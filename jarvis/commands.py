@@ -74,6 +74,7 @@ NEGATIVE_WORDS = [
     "no", "nel", "negativo", "para nada", "mejor no", "no gracias",
     "ni loco", "paso", "nop", "nope", "dejalo", "olvidalo", "cancela", "cancelalo",
     "despues", "luego", "mejor luego", "ahorita no", "tampoco", "espera",
+    "asi esta bien", "asi dejalo", "no hace falta", "no es necesario",
 ]
 
 
@@ -99,7 +100,9 @@ def _is_affirmative(text: str):
     """True/False si la respuesta suena claramente a 'si'/'no' por palabras
     clave. None si no se pudo determinar asi, y hay que preguntarle a la IA
     para que entienda el contexto (p.ej. sinonimos no listados)."""
-    cleaned = text.lower().strip().strip(".,!?¿¡").translate(_ACCENTS)
+    # sin signos adentro tambien: "no, gracias" no coincidia con "no gracias"
+    cleaned = re.sub(r"[^\w\s]", " ", text.lower().translate(_ACCENTS))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if _matches_any(cleaned, NEGATIVE_WORDS):
         return False
     if _matches_any(cleaned, AFFIRMATIVE_WORDS):
