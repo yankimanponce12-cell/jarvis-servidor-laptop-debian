@@ -179,6 +179,18 @@ def _sentence_ends(text: str) -> list[int]:
     return ends
 
 
+def split_sentences(text: str) -> list[str]:
+    """Frases completas de un texto (lo que sobre sin punto final va como ultima)."""
+    out, start = [], 0
+    for end in _sentence_ends(text):
+        if text[start:end].strip():
+            out.append(text[start:end].strip())
+        start = end
+    if text[start:].strip():
+        out.append(text[start:].strip())
+    return out
+
+
 def _trim_to_sentence(text: str) -> str:
     """Si el modelo se quedo sin tokens a mitad de frase (finish_reason
     'length'), recorta hasta la ultima frase COMPLETA en vez de dejar Jarvis
@@ -197,7 +209,7 @@ def _trim_to_sentence(text: str) -> str:
 # quitan del FINAL de la respuesta (si no queda nada mas, se dejan).
 _FILLER = re.compile(
     r"^[¡¿]?\s*(?:y\s+)?(?:"
-    r"(?:en\s+)?(?:que|como)\s+(?:mas\s+)?(?:le|te|lo|la)?\s*(?:puedo|podria)\s+(?:ayudar|servir|asistir)\w*"
+    r"(?:en\s+)?(?:que|como)\s+(?:mas\s+)?(?:le|te|lo|la)?\s*(?:puedo|podria|puede|pueda)\s+(?:ayudar|servir|asistir)\w*"
     r"|(?:le|te)\s+(?:puedo|podria)\s+ayudar\w*(?:\s+(?:con|en)\s+algo(?:\s+mas)?)?"
     r"|(?:necesita|necesitas|desea|deseas|quiere|quieres|requiere|hay)\s+(?:que\s+haga\s+)?algo\s+mas"
     r"(?:\s+(?:en\s+(?:lo\s+)?que|con\s+(?:lo\s+)?que|que)\s+(?:le\s+|te\s+)?(?:pueda|puedo)\s+(?:ayudar|servir|hacer)\w*"
@@ -208,6 +220,8 @@ _FILLER = re.compile(
     r"|estoy\s+(?:aqui\s+)?(?:para\s+(?:ayudar\w*|servir\w*|lo\s+que\s+necesite\w*)|a\s+(?:sus|tus)\s+ordenes)"
     r"|(?:no\s+dude\s+en|no\s+dudes\s+en)\s+\w+.*"
     r"|a\s+(?:sus|tus)\s+ordenes"
+    r"|si\s+(?:tienes|tiene|necesitas|necesita|quieres|quiere|desea|deseas)\s+(?:alguna\s+\w+|algo(?:\s+mas)?|ayuda|mas\s+\w+)"
+    r"(?:\s+(?:o|y)\s+(?:necesitas|necesita|quieres|quiere)\s+(?:ayuda|algo(?:\s+mas)?))?(?:\s*,?\s*(?:dime|digame|avisame|aviseme|aqui\s+estoy|estoy\s+aqui))?"
     r")(?:\s*,?\s*senor)?\s*(?:hoy)?\s*[?!.]*$"
 )
 _ACCENTS = str.maketrans("áéíóúñü", "aeiounu")

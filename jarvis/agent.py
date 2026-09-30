@@ -23,6 +23,7 @@ resolviendo los casos exactos de siempre, instantaneo, sin pasar por aca.
 Solo lo que no matchea ninguna regla llega hasta el agente."""
 
 import datetime
+import difflib
 import inspect
 import json
 import re
@@ -42,7 +43,7 @@ BASE_SYSTEM_PROMPT = (
     "Cuando pide una accion concreta usa la herramienta correspondiente. Si es charla, respondes "
     "tu mismo en 1-2 oraciones, sin markdown, como en una platica normal: haces lo que te piden "
     "y no terminas ofreciendo ayuda ni preguntando que mas necesita.\n"
-    "Ejemplos de charla:\n"
+    "Ejemplos de charla (solo muestran el tono: nunca los copies, cada respuesta es nueva y va con lo que dijo el usuario):\n"
     "Usuario: ¿cómo estás? -> Jarvis: Todos mis sistemas en orden, señor. Mejor que nunca.\n"
     "Usuario: dime una curiosidad -> Jarvis: Los pulpos tienen tres corazones, señor. Ninguno dedicado al romance, me temo.\n"
     "Usuario: estoy cansado -> Jarvis: Un día largo, entonces. Le sugiero una pausa, señor; el mundo puede esperar diez minutos."
@@ -170,53 +171,92 @@ def warm():
     llm.chat([{"role": "system", "content": _system(LONG_SYSTEM_PROMPT)}, hola], max_tokens=1, slot=llm.SLOT_LONG)
 
 
+def _norm(text: str) -> str:
+    text = text.lower().translate(_ACCENTS).translate(str.maketrans("ü", "u"))
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", text)).strip()
+
+
+def _parrots(sentence: str, heard: str) -> bool:
+    """True si la frase de Jarvis es (casi) lo que el usuario acaba de decir.
+    El modelo chico a veces le devolvia sus propias palabras ("¿Qué te parece
+    si prendes? A no nada, espera, espera.") y parecia que lo arremedaba."""
+    s, h = _norm(sentence), _norm(heard)
+    if len(s.split()) < 2 or not h:
+        return False
+    if f" {s} " in f" {h} ":
+        return True
+    return any(difflib.SequenceMatcher(None, s, _norm(part)).ratio() >= 0.75
+               for part in [heard, *llm.split_sentences(heard)])
+
+
 class _Emitter:
-    """Dice cada frase apenas la IA la termina (ver llm.chat_stream): la
-    primera con respond(frase) y las siguientes con respond(frase, append=True).
-    Solo existe si respond() acepta append (la interfaz de main.py); el
-    servidor del celular y las pruebas siguen recibiendo la respuesta entera."""
+    """Filtra y entrega las frases de la respuesta. Con una interfaz que
+    acepta respond(..., append=True) (la TUI de main.py) dice cada frase
+    apenas la IA la termina (ver llm.chat_stream); si no (el celular, las
+    pruebas), las junta y finish() las entrega de una vez. En los dos casos
+    descarta las frases que repiten lo que dijo el usuario."""
 
-    def __init__(self, respond):
+    def __init__(self, respond, heard: str):
         self._respond = respond
-        self.count = 0
-
-    @staticmethod
-    def for_(respond):
+        self._heard = heard
+        self.said: list[str] = []
         try:
-            ok = "append" in inspect.signature(respond).parameters
+            self._stream = "append" in inspect.signature(respond).parameters
         except (TypeError, ValueError):
-            ok = False
-        return _Emitter(respond) if ok else None
+            self._stream = False
 
     def __call__(self, sentence: str):
-        self._respond(sentence, append=self.count > 0)
-        self.count += 1
+        if _parrots(sentence, self._heard):
+            return
+        self.said.append(sentence)
+        if self._stream:
+            self._respond(sentence, append=len(self.said) > 1)
+
+    def feed(self, text: str, n: int = 3):
+        for sentence in llm.split_sentences(llm.limit_sentences(text, n=n)):
+            self(sentence)
+
+    @property
+    def text(self) -> str:
+        return " ".join(self.said)
+
+    def finish(self, fallback: str):
+        """Si no se dijo nada, fallback; sin streaming, entrega todo junto."""
+        if not self.said:
+            self.said.append(fallback)
+            if self._stream:
+                self._respond(fallback)
+        if not self._stream:
+            self._respond(self.text)
 
 
-def _chat(messages, tools=None, emit=None):
+_NO_PARROT = "No repitas lo que dijo el usuario: contesta con tus propias palabras."
+
+
+def _chat(messages, emit: _Emitter, tools=None):
     full = [{"role": "system", "content": _system(BASE_SYSTEM_PROMPT)}] + messages
     # 1-2 oraciones: ~90 tokens sobran; con 160 Qwen3 se extendia y tardaba ~20 s
-    if emit is not None:
-        msg = llm.chat_stream(full, on_sentence=emit, tools=tools, max_tokens=90, slot=llm.SLOT_AGENT)
-        if msg.get("content") or msg.get("tool_calls"):
-            return msg
-        # no salio nada limpio (p.ej. se fue al chino): chat() reintenta esos casos
-    msg = llm.chat(full, tools=tools, max_tokens=90, slot=llm.SLOT_AGENT)
-    if msg.get("content") and not msg.get("tool_calls"):
-        msg["content"] = llm.limit_sentences(msg["content"])  # red de seguridad: hasta 3 frases completas
-    return msg
+    msg = llm.chat_stream(full, on_sentence=emit, tools=tools, max_tokens=90, slot=llm.SLOT_AGENT)
+    if msg.get("tool_calls") or emit.said:
+        return msg
+    # no quedo nada (se fue al chino, o solo repitio al usuario): otro intento,
+    # sin herramientas y pidiendo que no repita
+    retry = llm.chat(full[:-1] + [{"role": "system", "content": _NO_PARROT}, full[-1]], max_tokens=90,
+                     slot=llm.SLOT_AGENT)
+    emit.feed(retry.get("content") or "")
+    return {"content": emit.text}
 
 
-def _converse(history: list, emit=None) -> str:
+def _converse(history: list, emit: _Emitter) -> str:
     """Respuesta de un parrafo completo (sin herramientas) para lo que pide explicacion."""
     full = [{"role": "system", "content": _system(LONG_SYSTEM_PROMPT)}] + history
-    if emit is not None:
-        msg = llm.chat_stream(full, on_sentence=emit, max_tokens=LONG_MAX_TOKENS,
-                              max_sentences=LONG_MAX_SENTENCES, slot=llm.SLOT_LONG)
-        if msg.get("content"):
-            return msg["content"]
-    msg = llm.chat(full, max_tokens=LONG_MAX_TOKENS, slot=llm.SLOT_LONG)
-    return llm.limit_sentences(msg.get("content") or "", n=LONG_MAX_SENTENCES)
+    llm.chat_stream(full, on_sentence=emit, max_tokens=LONG_MAX_TOKENS,
+                    max_sentences=LONG_MAX_SENTENCES, slot=llm.SLOT_LONG)
+    if not emit.said:
+        retry = llm.chat(full[:-1] + [{"role": "system", "content": _NO_PARROT}, full[-1]],
+                         max_tokens=LONG_MAX_TOKENS, slot=llm.SLOT_LONG)
+        emit.feed(retry.get("content") or "", n=LONG_MAX_SENTENCES)
+    return emit.text
 
 
 class Agent:
@@ -326,21 +366,20 @@ class Agent:
         Si algo falla (llama.cpp caido, respuesta rara), no lanza excepcion:
         cae a una respuesta generica, igual que hacia brain.ask()."""
         self.messages.append({"role": "user", "content": text})
-        emit = _Emitter.for_(respond)
+        emit = _Emitter(respond, text)
         if wants_long_answer(text):
             try:
-                texto = _converse(self._plain_history(), emit)
+                _converse(self._plain_history(), emit)
             except Exception:
                 self.messages.pop()
                 respond(_sir("No pude conectarme con mi modelo de IA local. Revise que llama.cpp esté corriendo"))
                 return
-            if not (emit and emit.count):
-                respond(texto or _sir("No entendí bien, intente de nuevo"))
-            self.messages.append({"role": "assistant", "content": texto})
+            emit.finish(_sir("Entendido"))
+            self.messages.append({"role": "assistant", "content": emit.text})
             self._trim_history()
             return
         try:
-            msg = _chat(self.messages, tools=TOOLS, emit=emit)
+            msg = _chat(self.messages, emit, tools=TOOLS)
         except Exception:
             self.messages.pop()
             respond(_sir("No pude conectarme con mi modelo de IA local. Revise que llama.cpp esté corriendo"))
@@ -348,10 +387,9 @@ class Agent:
 
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
-            texto = (msg.get("content") or "").strip()
-            if not (emit and emit.count):
-                respond(texto or _sir("No entendí bien, intente de nuevo"))
-            self.messages.append({"role": "assistant", "content": texto})
+            emit.finish(_sir("Entendido"))
+            # a la historia solo va lo que se dijo: sin las frases que repetian al usuario
+            self.messages.append({"role": "assistant", "content": emit.text})
             self._trim_history()
             return
 
@@ -406,7 +444,8 @@ def answer_from_memory(pregunta: str, resultados: list[str]) -> str:
         "relevante. Si no hay nada relacionado, decilo con naturalidad."
     )
     try:
-        msg = _chat([{"role": "user", "content": prompt}])
-        return (msg.get("content") or "").strip() or "No encontré nada relacionado, señor."
+        msg = llm.chat([{"role": "system", "content": _system(BASE_SYSTEM_PROMPT)}, {"role": "user", "content": prompt}],
+                       max_tokens=90, slot=llm.SLOT_AGENT)
+        return llm.limit_sentences(msg.get("content") or "") or "No encontré nada relacionado, señor."
     except Exception:
         return "No pude buscar en mi memoria ahorita, señor."
