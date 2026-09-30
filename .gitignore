@@ -55,3 +55,6 @@ openvoice_server/processed/
 .idea/
 .DS_Store
 Thumbs.db
+
+# --- voces de Piper (se descargan aparte, ver README) ---
+voces/

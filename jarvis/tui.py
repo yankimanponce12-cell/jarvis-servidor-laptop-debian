@@ -201,7 +201,10 @@ class Reactor(Widget):
     con un fundido suave y destella al interrumpir o pausar."""
 
     DEFAULT_CSS = "Reactor { width: 1fr; height: 1fr; min-height: 8; }"
-    FPS = 24
+    # Textual redibuja en Python: a 24 fps se comia ~un hilo entero del Ryzen 3
+    # 2200U, que ademas necesitan Whisper y la IA. En reposo basta con 4 fps.
+    FPS = 12
+    IDLE_EVERY = 3
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -228,7 +231,14 @@ class Reactor(Widget):
             self._flash, self._flash_t = kind, time.monotonic()
 
     def on_mount(self):
-        self.set_interval(1 / self.FPS, self.refresh)
+        self._frame = 0
+        self.set_interval(1 / self.FPS, self._tick)
+
+    def _tick(self):
+        self._frame += 1
+        if self._state == "inactivo" and self._flash is None and self._frame % self.IDLE_EVERY:
+            return
+        self.refresh()
 
     def _audio_level(self, t: float) -> float:
         if self._state == "hablando":
@@ -303,7 +313,7 @@ class NowPlaying(Widget):
 
     def on_mount(self):
         threading.Thread(target=self._poll, daemon=True).start()
-        self.set_interval(1 / 15, self._tick)
+        self.set_interval(1 / 4, self._tick)
 
     def _poll(self):
         """En un hilo aparte: playerctl tarda unos ms y no debe frenar la interfaz."""
@@ -398,7 +408,7 @@ class WeatherScene(Widget):
         self.border_title = "Clima"
 
     def on_mount(self):
-        self.set_interval(1 / 10, self.refresh)
+        self.set_interval(1 / 6, self.refresh)
 
     def set_data(self, data: dict):
         self.data = data
@@ -451,7 +461,7 @@ class MicBar(Widget):
         self._dragging = False
 
     def on_mount(self):
-        self.set_interval(1 / 15, self._tick)
+        self.set_interval(1 / 10, self._tick)
 
     @staticmethod
     def _frac(db: float) -> float:
@@ -603,7 +613,7 @@ class JarvisApp(App):
     def on_mount(self):
         self.query_one("#entrada", Input).focus()
         self.set_interval(1.0, self._tick_title)
-        self.set_interval(1 / 60, self._type_reply)
+        self.set_interval(1 / 30, self._type_reply)
         self._tick_title()
         # todo lo que se imprima (print, stderr de librerias) va al historial
         # en vez de romper la pantalla
@@ -705,8 +715,8 @@ class JarvisApp(App):
     def _type_reply(self):
         if self._reply_shown >= len(self._reply_full):
             return
-        # ~240 caracteres por segundo, y nunca mas de ~1.5 s para toda la respuesta
-        step = max(4, len(self._reply_full) // 90)
+        # ~240 caracteres por segundo (30 pasos/s), y nunca mas de ~1.5 s para toda la respuesta
+        step = max(8, len(self._reply_full) // 45)
         self._reply_shown = min(self._reply_shown + step, len(self._reply_full))
         shown = Text(self._reply_full[: self._reply_shown])
         if self._reply_shown < len(self._reply_full):

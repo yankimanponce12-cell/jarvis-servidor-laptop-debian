@@ -182,7 +182,7 @@ def api_command():
 
 @app.route("/api/voice-engine", methods=["GET"])
 def api_voice_engine_get():
-    """Motor de voz activo/configurado ahora mismo (xtts u openvoice), para
+    """Motor de voz activo/configurado ahora mismo (piper o sistema), para
     que el boton de configuracion del telefono sepa que mostrar marcado y
     pueda sondear esto mientras el elegido todavia esta cargando (ver
     voice_output.status())."""

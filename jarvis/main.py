@@ -190,6 +190,8 @@ class Session:
     def _warm_llm(self):
         try:
             llm.ensure_ready()
+            agent.warm()
+            brain.warm()
         except Exception as exc:
             self.hud.log(f"Modelo de IA no disponible: {exc}", "bold red")
 
@@ -411,7 +413,7 @@ class Session:
 
     def shutdown(self):
         """Cierra todo lo que Jarvis pudo haber dejado corriendo (el Brave de
-        WhatsApp Web, el servidor de OpenVoice, el llama-server propio) para
+        WhatsApp Web, el llama-server propio) para
         que no quede nada huerfano despues de decir 'adios' o Ctrl+Q."""
         with self._close_lock:
             if self._closed:
@@ -420,7 +422,6 @@ class Session:
         voice_output.stop()
         audio_focus.restore_now()  # que la musica no quede atenuada
         whatsapp.close()
-        voice_output.shutdown()
         llm.shutdown()
 
 
@@ -451,8 +452,7 @@ def main():
 
     def _terminated(signum, frame):
         # cerrar la ventana de la terminal (SIGHUP) o un `kill` (SIGTERM) mataba
-        # Jarvis SIN correr shutdown(): el llama-server (4.6 GB de GPU), Brave y
-        # OpenVoice quedaban huerfanos
+        # Jarvis SIN correr shutdown(): el llama-server y Brave quedaban huerfanos
         session.shutdown()
         os._exit(0)
 

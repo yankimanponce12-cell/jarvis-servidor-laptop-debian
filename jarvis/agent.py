@@ -148,13 +148,21 @@ def _sir(msg: str) -> str:
     return f"{msg.rstrip('.')}, señor."
 
 
-def _chat(messages, tools=None):
-    system = BASE_SYSTEM_PROMPT
+def _system(base: str) -> str:
     memoria = memory.get_core_memory_text()
-    if memoria:
-        system = f"{system}\n\n{memoria}"
+    return f"{base}\n\n{memoria}" if memoria else base
+
+
+def warm():
+    """Procesa de antemano el prompt del sistema + herramientas (lo mas caro en
+    CPU) para que llama-server lo tenga en cache cuando llegue el primer pedido."""
+    llm.chat([{"role": "system", "content": _system(BASE_SYSTEM_PROMPT)}, {"role": "user", "content": "hola"}],
+             tools=TOOLS, max_tokens=1)
+
+
+def _chat(messages, tools=None):
     msg = llm.chat(
-        [{"role": "system", "content": system}] + messages,
+        [{"role": "system", "content": _system(BASE_SYSTEM_PROMPT)}] + messages,
         tools=tools,
         max_tokens=160,
     )
@@ -165,11 +173,7 @@ def _chat(messages, tools=None):
 
 def _converse(history: list) -> str:
     """Respuesta de un parrafo completo (sin herramientas) para lo que pide explicacion."""
-    system = LONG_SYSTEM_PROMPT
-    memoria = memory.get_core_memory_text()
-    if memoria:
-        system = f"{system}\n\n{memoria}"
-    msg = llm.chat([{"role": "system", "content": system}] + history, max_tokens=LONG_MAX_TOKENS)
+    msg = llm.chat([{"role": "system", "content": _system(LONG_SYSTEM_PROMPT)}] + history, max_tokens=LONG_MAX_TOKENS)
     return llm.limit_sentences(msg.get("content") or "", n=LONG_MAX_SENTENCES)
 
 

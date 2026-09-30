@@ -91,3 +91,8 @@ def classify_yes_no(text: str):
 
 def reset():
     _brain.reset()
+
+
+def warm():
+    """Deja el prompt de la charla en la cache de llama-server (ver agent.warm)."""
+    llm.chat([{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": "hola"}], max_tokens=1)

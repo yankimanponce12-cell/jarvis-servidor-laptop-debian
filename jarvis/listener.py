@@ -1,13 +1,15 @@
 import collections
+import json
 import os
 import queue
 import re
 import threading
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 
-from jarvis import mic_config
+from jarvis import mic_config, wakeword
 
 SAMPLE_RATE = 16000
 FRAME = 512  # muestras por trama de audio (32 ms): el tamaño que exige el VAD Silero a 16 kHz
@@ -28,15 +30,28 @@ TAIL_KEEP_S = 0.25  # de ese silencio final, esto se deja en el audio
 MIN_SPEECH_S = 0.25  # menos voz que esto es un ruido (golpe, tos), no una frase
 MAX_DURATION = 12  # tope duro de grabacion en segundos
 NO_SPEECH_TIMEOUT = 8  # en modo "habla ahora": sin voz en tanto tiempo, se rinde
-PARTIAL_INTERVAL_S = 1.0  # transcripcion parcial (la que se ve mientras hablas) cada ~1 s de voz
-PARTIAL_MIN_SPEECH_S = 0.6
-# --- interrumpir a Jarvis mientras habla ("callate", "Jarvis, ...") ---------
-# Mientras Jarvis habla, el microfono oye su voz por los parlantes: el VAD ve
-# voz continua y la frase no cierra hasta que Jarvis termina. Por eso se
-# transcriben (rapido, beam 1) los ultimos BARGE_WINDOW_S de audio cada
-# BARGE_EVERY_S, buscando la orden de corte.
-BARGE_WINDOW_S = 1.6  # alcanza para "Jarvis, callate"; mas corto = mas rapido (Whisper en CPU tarda ~0.8 s)
-BARGE_EVERY_S = 0.4
+
+# --- palabra de activacion (Vosk) -------------------------------------------
+# En esta CPU (Ryzen 3 2200U) Whisper tarda ~2 s por frase aunque sea corta
+# (siempre codifica una ventana de 30 s), asi que ya no se transcribe TODO lo
+# que se oye buscando "Jarvis". Vosk, con una gramatica de pocas palabras,
+# escucha todo el tiempo (~3% de un hilo) y Whisper solo corre en las frases
+# donde Vosk oyo "jarvis".
+# Vosk con gramatica cerrada no se le escapa ningun "jarvis" (16/16 en
+# pruebas) pero da falsas alarmas (~1 cada 20 s de voz: "Harvard", "jarabe"),
+# asi que es solo el disparador: la orden vale si Whisper TAMBIEN escribe
+# "Jarvis". Una falsa alarma cuesta ~2 s de CPU, nunca ejecuta nada.
+# Solo UNA palabra en la gramatica: con varias ("callate", "silencio"...) Vosk
+# fuerza cualquier voz a la mas parecida y las falsas alarmas se disparan.
+# (openWakeWord "hey_jarvis" se probo y no detecta la pronunciacion en español.)
+VOSK_MODEL = Path(os.environ.get("JARVIS_VOSK_MODEL", Path.home() / "modelos" / "vosk-model-small-es-0.42"))
+WAKE_KEYWORD = "jarvis"
+# Interrumpir a Jarvis mientras habla: al oir "jarvis" se espera BARGE_TAIL_S
+# (para captar "..., callate") y se transcriben los ultimos BARGE_WINDOW_S; si
+# Whisper confirma, se corta. Sin confirmar, el eco de su propia voz (que Vosk
+# a veces confunde con "jarvis") lo cortaria solo.
+BARGE_WINDOW_S = 2.5
+BARGE_TAIL_S = 0.8
 
 # --- respaldo por energia: solo si el VAD Silero no carga -------------------
 # umbral adaptativo (ver NoiseFloor): con musica o ruido de fondo el umbral
@@ -70,10 +85,7 @@ _HALLUCINATIONS = re.compile(
     re.IGNORECASE,
 )
 
-# beam_size=5 para la frase final (la que se ejecuta); 1 para las parciales
-# (solo se ven en pantalla, y deben terminar antes de la siguiente)
 FINAL_DECODE = dict(beam_size=5, temperature=(0.0, 0.2, 0.4), no_speech_threshold=0.6, without_timestamps=True)
-PARTIAL_DECODE = dict(beam_size=1, temperature=0.0, no_speech_threshold=0.6, without_timestamps=True)
 
 
 def condition_audio(audio: np.ndarray) -> np.ndarray:
@@ -108,10 +120,8 @@ def clean_transcript(text: str) -> str:
 
 
 def _pick_device_and_compute_type():
-    """GPU si ctranslate2 (el motor de faster-whisper) ve una NVIDIA; se
-    pregunta a el y no a torch, para no cargar torch (lento y pesado) solo
-    por esto. Las librerias CUDA 12/cuDNN 9 (pip nvidia-cublas-cu12,
-    nvidia-cudnn-cu12) las expone el lanzador bin/jarvis via LD_LIBRARY_PATH."""
+    """GPU solo si ctranslate2 (el motor de faster-whisper) ve una NVIDIA con
+    CUDA; en esta laptop (grafica AMD integrada) siempre es CPU con int8."""
     try:
         import ctranslate2
 
@@ -125,7 +135,8 @@ def _pick_device_and_compute_type():
 def _load_whisper(model_size: str, device: str, compute_type: str):
     from faster_whisper import WhisperModel
 
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+    # los 4 hilos: Whisper corre solo tras "Jarvis", cuando la IA no esta pensando
+    model = WhisperModel(model_size, device=device, compute_type=compute_type, cpu_threads=4)
     if device == "cuda":
         # ctranslate2 carga cublas/cudnn de forma perezosa: sin esta pasada
         # de prueba, un CUDA mal instalado solo fallaria en la primera frase
@@ -234,6 +245,46 @@ def make_vad():
         return EnergyVad()
 
 
+class KeywordSpotter:
+    """Vosk con gramatica cerrada: solo reconoce "jarvis" (el resto sale como
+    [unk]). feed() recibe tramas float32 a 16 kHz y devuelve las detecciones
+    NUEVAS de los resultados parciales (rapidas, sirven para interrumpir).
+    heard_final() dice si "jarvis" quedo en el resultado FINAL de lo que se
+    dijo: los parciales se corrigen solos y por si mismos daban falsas alarmas
+    en casi cualquier frase."""
+
+    def __init__(self):
+        import vosk
+
+        vosk.SetLogLevel(-1)
+        if not VOSK_MODEL.is_dir():
+            raise RuntimeError(f"No encontre el modelo de Vosk en {VOSK_MODEL}")
+        self._rec = vosk.KaldiRecognizer(
+            vosk.Model(str(VOSK_MODEL)), SAMPLE_RATE, json.dumps([WAKE_KEYWORD, "[unk]"])
+        )
+        self._seen = 0  # palabras del resultado parcial ya reportadas
+        self._final_hit = False
+
+    def feed(self, frame: np.ndarray) -> list[str]:
+        pcm = (np.clip(frame, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+        if self._rec.AcceptWaveform(pcm):
+            words, final = json.loads(self._rec.Result()).get("text", "").split(), True
+            self._final_hit |= WAKE_KEYWORD in words
+        else:
+            words, final = json.loads(self._rec.PartialResult()).get("partial", "").split(), False
+        new = words[self._seen :]
+        self._seen = 0 if final else len(words)
+        return [w for w in new if w != "[unk]"]
+
+    def heard_final(self) -> bool:
+        """Cierra lo que Vosk tenia a medias (la frase acaba de terminar) y
+        dice si en los resultados finales desde la ultima llamada hubo "jarvis"."""
+        self._final_hit |= WAKE_KEYWORD in json.loads(self._rec.FinalResult()).get("text", "").split()
+        self._seen = 0
+        hit, self._final_hit = self._final_hit, False
+        return hit
+
+
 class Endpointer:
     """Corta el flujo del microfono en frases. Se le da trama por trama
     (FRAME muestras) con feed(); cuando una frase termina devuelve su audio.
@@ -332,7 +383,8 @@ class VoiceListener:
         # nivel del modulo: tarda ~2.8s por si solo y main.py importa este
         # modulo al arrancar; asi se paga recien al construir VoiceListener(),
         # que ya pasa en un hilo de fondo con la interfaz visible.
-        model_size = model_size or os.environ.get("JARVIS_WHISPER_MODEL", "small")
+        # "base" y no "small": en esta CPU small tarda ~7 s por frase y base ~2 s
+        model_size = model_size or os.environ.get("JARVIS_WHISPER_MODEL", "base")
         if device is None or compute_type is None:
             auto_device, auto_compute_type = _pick_device_and_compute_type()
             device = device or auto_device
@@ -345,116 +397,64 @@ class VoiceListener:
                 raise
             print(f"Whisper no pudo usar la GPU ({exc}); uso la CPU (mas lento).")
             self.model = _load_whisper(model_size, "cpu", "int8")
-        self._partial_lock = threading.Lock()
-        self._latest_partial_seq = 0
-        self._partial_busy = False
+        self._spotter = KeywordSpotter()
         self._vad = make_vad()
         self._device = _mic_device()
         self._reset_requested = False
         # los pone main.py: barge_in_active() dice si Jarvis esta hablando, y
-        # on_barge_in(texto) recibe lo que se oyo en la ventana mientras tanto
+        # on_barge_in(texto) recibe lo que se oyo mientras tanto (ya confirmado por Whisper)
         self.barge_in_active = None
         self.on_barge_in = None
         self._ring = collections.deque(maxlen=int(BARGE_WINDOW_S / FRAME_S))
-        self._barge_frames = 0
+        self._barge_countdown = 0  # tramas que faltan para verificar una posible interrupcion
         self._barge_busy = False
 
-    def _fire_partial(self, audio_so_far: np.ndarray, language: str, on_partial) -> bool:
-        """Dispara una transcripcion parcial del audio acumulado hasta
-        ahora, en un hilo aparte para no frenar la captura de audio en
-        tiempo real (que tiene que seguir leyendo el microfono). Si mientras
-        tanto se dispara una parcial mas nueva (o la grabacion ya termino),
-        esta se descarta al terminar en vez de pisar un resultado mas fresco
-        con uno mas viejo.
+    def _speaking(self) -> bool:
+        return self.barge_in_active is not None and self.barge_in_active()
 
-        Si ya hay una parcial corriendo, esta llamada no hace nada (y
-        devuelve False): la transcripcion crece con el audio acumulado, asi
-        que puede tardar mas que el intervalo entre disparos, y lanzar una
-        nueva GPU sin esperar a que termine la anterior las apila todas
-        compitiendo por la misma GPU, dejando al HUD (que tambien depende
-        de la GPU para sus animaciones) a los tumbos."""
-        with self._partial_lock:
-            if self._partial_busy:
-                return False
-            self._partial_busy = True
-            self._latest_partial_seq += 1
-            seq = self._latest_partial_seq
-
-        def work():
-            try:
-                text = self._safe_transcribe(audio_so_far, language, partial=True)
-            finally:
-                with self._partial_lock:
-                    self._partial_busy = False
-            if not text:
-                return
-            with self._partial_lock:
-                if seq != self._latest_partial_seq:
-                    return  # quedo vieja: ya hay una parcial mas nueva (o la grabacion termino)
-            on_partial(text)
-
-        threading.Thread(target=work, daemon=True).start()
-        return True
-
-    def _invalidate_pending_partials(self):
-        """Se llama al terminar de grabar una frase: cualquier transcripcion
-        parcial que siga en vuelo a partir de aca queda vieja y no debe
-        pisar el resultado final (mas preciso) que se muestra despues."""
-        with self._partial_lock:
-            self._latest_partial_seq += 1
-
-    def _watch_barge_in(self, frame: np.ndarray, language: str):
-        """Ventana deslizante mientras Jarvis habla (ver BARGE_WINDOW_S)."""
-        self._ring.append(frame)
-        active = self.barge_in_active is not None and self.on_barge_in is not None and self.barge_in_active()
-        if not active:
-            self._barge_frames = 0
+    def _verify_barge_in(self, language: str):
+        """Transcribe la ventana reciente en otro hilo; si de verdad dijeron
+        "Jarvis" (o una palabra de corte), se lo pasa a main.py para cortar."""
+        if self._barge_busy or self.on_barge_in is None:
             return
-        self._barge_frames += 1
-        if self._barge_busy or self._barge_frames * FRAME_S < BARGE_EVERY_S:
-            return
-        self._barge_frames = 0
         self._barge_busy = True
         audio = np.concatenate(self._ring)
 
         def work():
             try:
-                text = self._safe_transcribe(audio, language, partial=True)
-                if text:
+                text = self._safe_transcribe(audio, language)
+                if text and self._speaking():
                     self.on_barge_in(text)
             finally:
                 self._barge_busy = False
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _next_utterance(self, q, endpointer: Endpointer, language: str, on_partial, barge_in: bool = False) -> np.ndarray:
+    def _on_keywords(self, words: list[str]):
+        """Un "jarvis" parcial (sin confirmar) mientras Jarvis habla: programa
+        la verificacion de una interrupcion."""
+        if WAKE_KEYWORD in words and self._speaking():
+            self._barge_countdown = int(BARGE_TAIL_S / FRAME_S)
+
+    def _next_utterance(self, q, endpointer: Endpointer, language: str = "es", spot: bool = False) -> np.ndarray:
         """Lee tramas de la cola hasta que el Endpointer cierra una frase."""
-        frames_since_partial = 0
         while True:
             frame = q.get()
-            if barge_in:
-                self._watch_barge_in(frame, language)
+            if spot:
+                self._ring.append(frame)
+                words = self._spotter.feed(frame)
+                if words:
+                    self._on_keywords(words)
+                if self._barge_countdown:
+                    self._barge_countdown -= 1
+                    if not self._barge_countdown and self._speaking():
+                        self._verify_barge_in(language)
             if self._reset_requested:  # flush_pending_audio: lo que habia a medias era el eco de Jarvis
                 self._reset_requested = False
                 endpointer.reset()
-                frames_since_partial = 0
             audio = endpointer.feed(frame)
             if audio is not None:
-                self._invalidate_pending_partials()
                 return audio
-
-            if not endpointer.speaking:
-                frames_since_partial = 0
-                continue
-            frames_since_partial += 1
-            if (
-                on_partial is not None
-                and endpointer.speech_seconds >= PARTIAL_MIN_SPEECH_S
-                and endpointer.trailing_silence_seconds < 0.3  # con la frase por cerrarse, la parcial solo estorba
-                and frames_since_partial * FRAME_S >= PARTIAL_INTERVAL_S
-            ):
-                if self._fire_partial(endpointer.audio_so_far(), language, on_partial):
-                    frames_since_partial = 0
 
     def _open_stream(self, q):
         def callback(indata, frames, time_info, status):
@@ -471,20 +471,22 @@ class VoiceListener:
             callback=callback,
         )
 
-    def _safe_transcribe(self, audio: np.ndarray, language: str, partial: bool = False) -> str:
+    def _safe_transcribe(self, audio: np.ndarray, language: str) -> str:
         """Corre el modelo de Whisper y devuelve el texto transcrito. Nunca
-        lanza excepcion hacia el llamador: una falla transitoria de CUDA (se
-        vio pasar en la practica: 'device-side assert triggered') no debe
-        tirar abajo todo Jarvis - simplemente se descarta esa frase y se
-        sigue escuchando, igual que si se hubiera transcrito vacia."""
+        lanza excepcion hacia el llamador: una falla no debe tirar abajo todo
+        Jarvis - simplemente se descarta esa frase y se sigue escuchando,
+        igual que si se hubiera transcrito vacia."""
         try:
             segments, _ = self.model.transcribe(
                 condition_audio(audio),
                 language=language,
                 initial_prompt=WAKE_WORD_PROMPT,
+                # sin esto la "Jarvis" dicha en español salia "Tarmis", "Farvis"...
+                # (probado: 10/16 -> 12/16 frases con Jarvis, sin falsos positivos)
+                hotwords="Jarvis",
                 vad_filter=True,
                 condition_on_previous_text=False,
-                **(PARTIAL_DECODE if partial else FINAL_DECODE),
+                **FINAL_DECODE,
             )
             return clean_transcript(" ".join(segment.text.strip() for segment in segments))
         except Exception as exc:
@@ -493,12 +495,13 @@ class VoiceListener:
 
     def listen_and_transcribe(self, language="es", on_partial=None):
         """Una sola frase: empieza a escuchar ya (el usuario acaba de pulsar
-        Enter, o Jarvis acaba de hacerle una pregunta) y devuelve su texto."""
+        Enter, o Jarvis acaba de hacerle una pregunta) y devuelve su texto.
+        Aqui no hace falta decir "Jarvis": se transcribe lo que se diga."""
         q = queue.Queue()
         endpointer = Endpointer(make_vad(), wait_timeout=NO_SPEECH_TIMEOUT)
         print("Escuchando... habla ahora.")
         with self._open_stream(q):
-            audio = self._next_utterance(q, endpointer, language, on_partial)
+            audio = self._next_utterance(q, endpointer)
         if audio.size == 0:
             return ""
         return self._safe_transcribe(audio, language)
@@ -520,21 +523,29 @@ class VoiceListener:
     def listen_forever(self, language="es", on_partial=None, yield_empty=False):
         """Generador: bloquea hasta capturar cada frase dicha frente al
         microfono (sin necesidad de presionar Enter) y va cediendo el texto
-        transcrito de cada una, indefinidamente. Con yield_empty=True tambien
-        cede "" por cada frase descartada (ruido, eco, sin texto): main.py lo
-        usa para soltar la musica que atenuo al oir "Jarvis" en una parcial."""
+        transcrito de cada una, indefinidamente. Solo se transcriben las
+        frases donde Vosk oyo "jarvis", y solo se ceden si Whisper lo
+        confirma (en cualquier parte: "¿que hora es, Jarvis?" llega como
+        "Jarvis, ¿que hora es?"). Con yield_empty=True
+        tambien cede "" por cada frase descartada (ruido, eco, no era para
+        Jarvis): main.py lo usa para soltar la musica que atenuo al oir "Jarvis"."""
         q = queue.Queue()
         self._current_queue = q
         endpointer = Endpointer(self._vad)
         with self._open_stream(q):
             while True:
-                audio = self._next_utterance(q, endpointer, language, on_partial, barge_in=True)
-                if audio.size and self.barge_in_active is not None and self.barge_in_active():
+                audio = self._next_utterance(q, endpointer, language, spot=True)
+                for_jarvis = self._spotter.heard_final()
+                if audio.size and self._speaking():
                     # frase que termino con Jarvis hablando: es su eco (una orden
-                    # real ya lo habria cortado via la ventana). Transcribirla con
-                    # beam 5 solo retrasaria la siguiente frase de verdad.
+                    # real ya lo habria cortado con las palabras clave)
                     audio = audio[:0]
-                text = self._safe_transcribe(audio, language) if audio.size else ""
+                text = ""
+                if audio.size and for_jarvis:
+                    if on_partial is not None:
+                        on_partial("Jarvis…")  # la interfaz baja la musica mientras Whisper transcribe
+                    # solo vale si Whisper tambien oyo "Jarvis" (Vosk da falsas alarmas)
+                    text = wakeword.with_wake_prefix(self._safe_transcribe(audio, language)) or ""
                 if text or yield_empty:
                     yield text
 

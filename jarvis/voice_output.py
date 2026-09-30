@@ -3,9 +3,8 @@ import threading
 from pathlib import Path
 
 from . import voice_config
-from .tts_openvoice import OpenVoiceClient
+from .tts_piper import PiperSpeaker
 from .tts_system import SystemSpeaker
-from .tts_xtts import XTTSSpeaker
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "logs"
@@ -27,45 +26,33 @@ def _setup_logging():
 
 
 class VoiceEngine:
-    """Motor de voz con TRES opciones intercambiables (la tercera, "sistema",
-    es espeak-ng: respaldo sin modelos): XTTS v2 (local,
-    clonado end-to-end, mas fiel pero pesado: ~2GB VRAM, ~3s por oracion) y
-    OpenVoice V2 (subprocess aparte, ~4x mas rapido pero se parece un poco
-    menos a la voz de referencia).
+    """Motor de voz con dos opciones intercambiables: Piper (voz neuronal
+    ligera, en CPU) y "sistema" (espeak-ng: respaldo robotico sin modelos).
 
-    A proposito, NINGUNO de los dos se carga hasta que hace falta: solo el
-    motor ACTIVO (segun voice_config) se carga en segundo plano al llamar
-    iniciar(), y el otro se queda sin cargar (ni VRAM ni tiempo de arranque
-    gastados en el que no se esta usando) hasta que el usuario cambia de
-    voz desde el boton de configuracion (ver switch_engine)."""
+    Solo el motor ACTIVO (segun voice_config) se carga en segundo plano al
+    llamar iniciar(); el otro espera hasta que el usuario cambia de voz
+    (F2 o el boton del telefono, ver switch_engine)."""
 
     def __init__(self):
         _setup_logging()
         self._lock = threading.Lock()
-        self._xtts: XTTSSpeaker | None = None
-        self._openvoice: OpenVoiceClient | None = None
+        self._piper: PiperSpeaker | None = None
         self._system: SystemSpeaker | None = None
         self._active_engine: str | None = None
         self._loading_engine: str | None = None
         self._load_error: str | None = None
         # una sola voz a la vez: el saludo, una respuesta y un aviso proactivo
-        # podian hablar encimados, y dos hilos usando XTTS a la vez rompian la
-        # sintesis ("size of tensor a (80) must match b (49)")
+        # podian hablar encimados
         self._speak_lock = threading.RLock()
         self.stop_event = threading.Event()
         self.speaking_text = ""  # lo que se esta diciendo (para no confundir el eco con una orden)
 
     def _load(self, engine: str):
-        if engine == "xtts":
-            if self._xtts is None:
-                self._xtts = XTTSSpeaker()
-        elif engine == "sistema":
-            if self._system is None:
-                self._system = SystemSpeaker()
-        else:
-            if self._openvoice is None:
-                self._openvoice = OpenVoiceClient()
-            self._openvoice.ensure_ready()
+        if engine == "piper":
+            if self._piper is None:
+                self._piper = PiperSpeaker(voice_config.get_voice())
+        elif self._system is None:
+            self._system = SystemSpeaker()
 
     def ensure_loaded(self, engine: str):
         """Bloquea hasta que `engine` este listo (lo carga si hace falta).
@@ -109,7 +96,7 @@ class VoiceEngine:
         }
 
     def _speaker(self, engine: str):
-        return {"xtts": self._xtts, "openvoice": self._openvoice, "sistema": self._system}[engine]
+        return {"piper": self._piper, "sistema": self._system}[engine]
 
     def hablar(self, texto: str):
         if not texto:
@@ -132,7 +119,7 @@ class VoiceEngine:
             logger.error(f"Motor de voz ({engine}) fallo, este mensaje no se pudo hablar: {exc}")
         if engine != voice_config.FALLBACK_ENGINE and not self.stop_event.is_set():
             # que Jarvis nunca se quede mudo si el motor elegido no carga
-            # (falta el audio de referencia, OpenVoice caido, etc.)
+            # (falta la voz de Piper, etc.)
             try:
                 self.ensure_loaded(voice_config.FALLBACK_ENGINE)
                 self._system.speak(texto, stop_event=self.stop_event)
@@ -150,16 +137,11 @@ class VoiceEngine:
         engine = voice_config.get_engine()
         try:
             self.ensure_loaded(engine)
-            with self._speak_lock:  # la misma GPU/modelo que hablar()
+            with self._speak_lock:  # el mismo modelo que hablar()
                 return self._speaker(engine).synthesize_wav_bytes(texto)
         except Exception as exc:
             logger.error(f"Motor de voz ({engine}) fallo al sintetizar audio para el telefono: {exc}")
             return b""
-
-    def shutdown(self):
-        if self._openvoice is not None:
-            self._openvoice.stop()
-
 
 _engine: VoiceEngine | None = None
 # el hilo de voz (mic/wake word) y el del servidor HTTP para el telefono
@@ -219,9 +201,3 @@ def switch_engine(engine: str):
 def status() -> dict:
     return iniciar().status()
 
-
-def shutdown():
-    """Corta el subprocess de OpenVoice si estaba corriendo, para no dejarlo
-    huerfano al cerrar Jarvis."""
-    if _engine is not None:
-        _engine.shutdown()

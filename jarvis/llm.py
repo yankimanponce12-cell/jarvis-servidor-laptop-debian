@@ -1,16 +1,16 @@
 """Cliente del modelo de lenguaje local: llama.cpp (llama-server), que expone
 una API compatible con OpenAI (/v1/chat/completions) con tool-calling gracias
-a --jinja. Brain y agente usan el MISMO modelo/servidor (un solo modelo en la
-GPU en vez de dos).
+a --jinja. Brain y agente usan el MISMO modelo/servidor (uno solo en memoria).
 
-Como OpenVoice (ver tts_openvoice.py), el servidor se arranca solo, bajo
-demanda, si no hay uno escuchando ya; se puede sobreescribir todo con
-variables de entorno:
+Corre en la CPU (esta laptop no tiene GPU NVIDIA): modelo chico (Qwen2.5 1.5B)
+y los nucleos fisicos. El servidor se arranca solo, bajo demanda, si no
+hay uno escuchando ya; se puede sobreescribir todo con variables de entorno:
 
   JARVIS_LLAMA_SERVER  ruta al binario llama-server
   JARVIS_MODEL         ruta al .gguf
   JARVIS_LLM_URL       si ya tenes un servidor corriendo (no se arranca otro)
-  JARVIS_LLM_CTX       tamaño de contexto (por defecto 4096)
+  JARVIS_LLM_CTX       tamaño de contexto total (por defecto 4096, 2048 por slot)
+  JARVIS_LLM_THREADS   hilos de CPU (por defecto 2)
 """
 
 import json
@@ -29,12 +29,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "logs"
 
 LLAMA_SERVER = Path(
-    os.environ.get("JARVIS_LLAMA_SERVER", Path.home() / "llama.cpp" / "llama-b11062" / "llama-server")
+    os.environ.get("JARVIS_LLAMA_SERVER", Path.home() / "llama.cpp" / "llama-b11279" / "llama-server")
 )
 MODEL_PATH = Path(
-    os.environ.get("JARVIS_MODEL", Path.home() / "modelos" / "Qwen3-4B-Instruct-2507-Q4_K_M.gguf")
+    os.environ.get("JARVIS_MODEL", Path.home() / "modelos" / "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf")
 )
+# Dos slots de 2048: uno se queda con el prompt del agente (+ herramientas) y el
+# otro con el de la charla (brain.py). Con uno solo se pisaban y cada cambio
+# volvia a procesar ~800 tokens de prompt: ~40 s en esta CPU (20 tokens/s).
 CONTEXT = os.environ.get("JARVIS_LLM_CTX", "4096")
+# 2 = los nucleos fisicos del Ryzen 3 2200U: con 4 hilos no va mas rapido (medido
+# con llama-bench) y deja sin CPU a Whisper y a la interfaz
+THREADS = os.environ.get("JARVIS_LLM_THREADS", "2")
 # 8081 y no 8080: el servidor.sh de ~/llama.cpp ya usa 8080 para su chat web
 PORT = 8081
 BASE_URL = os.environ.get("JARVIS_LLM_URL", f"http://127.0.0.1:{PORT}").rstrip("/")
@@ -70,8 +76,10 @@ def _start_server():
             str(LLAMA_SERVER),
             "-m", str(MODEL_PATH),
             "--jinja",
-            "-ngl", "99",
+            "-ngl", "0",  # todo en CPU
+            "-t", THREADS,
             "-c", CONTEXT,
+            "--parallel", "2",
             "--host", "127.0.0.1",
             "--port", str(PORT),
         ],
@@ -83,7 +91,7 @@ def _start_server():
     )
 
 
-def ensure_ready(timeout: float = 180.0):
+def ensure_ready(timeout: float = 240.0):
     """Bloquea hasta que el modelo este cargado (lo arranca si hace falta).
     Idempotente. Lanza LLMUnavailable si no se puede."""
     if _healthy():
@@ -165,7 +173,7 @@ def limit_sentences(text: str, n: int = 3) -> str:
     ends = _sentence_ends(text)
     if ends and ends[-1] < len(text.rstrip()):
         # la respuesta quedo a medias (se acabo max_tokens): esa cola sin
-        # terminar hacia que XTTS balbuceara tonterias al final
+        # terminar se leia en voz alta cortada a media palabra
         text = text[: ends[-1]]
     if len(ends) <= n:
         return text
@@ -176,7 +184,7 @@ def limit_sentences(text: str, n: int = 3) -> str:
 
 
 # Qwen a veces se sale a chino/japones/coreano a mitad de una respuesta en
-# español (se vio en la demo: "el的愿望 生成一个中文…"). XTTS lo leeria como
+# español (se vio en la demo: "el的愿望 生成一个中文…"). La voz lo leeria como
 # basura, asi que se detecta, se reintenta mas conservador y, si persiste, se
 # corta antes del primer caracter raro.
 _CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")

@@ -1,4 +1,4 @@
-"""Reproduccion de la voz de Jarvis, comun a los tres motores (XTTS, OpenVoice,
+"""Reproduccion de la voz de Jarvis, comun a los dos motores (Piper y
 espeak): escribe el audio a la placa en pedazos cortos para poder CORTARLO al
 instante (el usuario dijo "callate") y va publicando el nivel de lo que suena,
 que el reactor de la interfaz usa para moverse al ritmo de la voz."""
@@ -17,7 +17,7 @@ logger = logging.getLogger("jarvis.voice")
 SLICE_S = 0.05  # cada cuanto se revisa si hay que cortar
 SPEECH_RMS = 0.12  # RMS de una voz "fuerte": nivel 1.0 para la animacion
 # Colchon de la placa de sonido. Con latency="high" PortAudio/ALSA daba solo
-# ~35 ms: cualquier hilo de Python (la animacion de la TUI, Whisper, XTTS)
+# ~35 ms: cualquier hilo de Python (la animacion de la TUI, Whisper, Piper)
 # que retuviera el GIL un poco mas dejaba la placa sin datos y la voz se
 # cortaba entre palabras. 0.4 s lo absorbe; "callate" sigue cortando al
 # instante porque abort() descarta lo que hay en el buffer.

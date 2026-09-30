@@ -564,7 +564,7 @@ html, body {
   transform: scale(0.95);
 }
 
-/* ================= configuracion de voz (elegir XTTS u OpenVoice) ================= */
+/* ================= configuracion de voz (elegir Piper o espeak) ================= */
 
 .bottom-actions {
   display: flex;

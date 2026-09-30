@@ -6,8 +6,10 @@ handle() es el punto de entrada de commands.py: recibe el texto ya normalizado
 (minusculas, sin tildes) y devuelve True si el comando era de este modulo.
 
 Todo se ejecuta con herramientas del sistema (nmcli, bluetoothctl, rfkill,
-brightnessctl, playerctl, upower, nvidia-smi); si falta alguna, el comando
-responde que no esta disponible en vez de romperse."""
+playerctl, upower, busctl) y /sys; si falta alguna, el comando responde que
+no esta disponible en vez de romperse. Adaptado a una laptop AMD (Ryzen +
+grafica Vega integrada): temperatura por k10temp, GPU por amdgpu en /sys y
+brillo por logind (sin root ni brightnessctl)."""
 
 import difflib
 import glob
@@ -390,7 +392,30 @@ def _cpu_percent() -> float | None:
         return None
 
 
+def _hwmon(name: str) -> str | None:
+    """Carpeta /sys/class/hwmon/hwmonN del sensor con ese nombre (k10temp, amdgpu...)."""
+    for d in glob.glob("/sys/class/hwmon/hwmon*"):
+        try:
+            if open(f"{d}/name").read().strip() == name:
+                return d
+        except OSError:
+            continue
+    return None
+
+
+def _read_int(path: str) -> int | None:
+    try:
+        return int(open(path).read().strip())
+    except (OSError, ValueError):
+        return None
+
+
 def _cpu_temp() -> float | None:
+    # Ryzen: k10temp (Tctl). Las thermal_zone "acpitz" de esta laptop no son el CPU.
+    d = _hwmon("k10temp")
+    t = _read_int(f"{d}/temp1_input") if d else None
+    if t is not None:
+        return t / 1000
     temps = {}
     for zone in glob.glob("/sys/class/thermal/thermal_zone*"):
         try:
@@ -416,15 +441,19 @@ def _memory() -> tuple[float, float] | None:
 
 
 def _gpu() -> tuple[int, int, float, float] | None:
-    ok, out = _run(["nvidia-smi", "--query-gpu=temperature.gpu,utilization.gpu,memory.used,memory.total",
-                    "--format=csv,noheader,nounits"])
-    if not ok:
-        return None
-    try:
-        t, u, mu, mt = [x.strip() for x in out.splitlines()[0].split(",")]
-        return int(t), int(u), int(mu) / 1024, int(mt) / 1024
-    except (ValueError, IndexError):
-        return None
+    """(grados, % de uso, GB de video usados, GB totales) de la grafica AMD
+    (driver amdgpu, todo en /sys), o None si no hay."""
+    for dev in glob.glob("/sys/class/drm/card*/device"):
+        busy = _read_int(f"{dev}/gpu_busy_percent")
+        if busy is None:
+            continue
+        d = _hwmon("amdgpu")
+        temp = _read_int(f"{d}/temp1_input") if d else None
+        used, total = _read_int(f"{dev}/mem_info_vram_used"), _read_int(f"{dev}/mem_info_vram_total")
+        if temp is None or used is None or not total:
+            return None
+        return temp // 1000, busy, used / 1024**3, total / 1024**3
+    return None
 
 
 def system_report() -> str:
@@ -443,6 +472,7 @@ def system_report() -> str:
         parts.append(
             f"la tarjeta gráfica está a {gpu[0]} grados, al {gpu[1]} por ciento, "
             f"con {_num(gpu[2])} de {_num(gpu[3])} gigas de video ocupados"
+            if gpu[3] >= 1.5 else f"la gráfica integrada está a {gpu[0]} grados y al {gpu[1]} por ciento"
         )
     return ", ".join(parts) if parts else "No pude leer el estado del sistema"
 
@@ -451,18 +481,30 @@ def system_report() -> str:
 BRIGHTNESS_MIN = 5  # nunca dejar la pantalla en negro
 
 
+def _backlight() -> str | None:
+    devices = sorted(glob.glob("/sys/class/backlight/*"))
+    return devices[0] if devices else None
+
+
 def brightness_get() -> int | None:
-    ok, out = _run(["brightnessctl", "-m"])
-    if ok:
-        parts = out.splitlines()[0].split(",")
-        if len(parts) >= 4 and parts[3].rstrip("%").isdigit():
-            return int(parts[3].rstrip("%"))
-    return None
+    dev = _backlight()
+    if dev is None:
+        return None
+    cur, top = _read_int(f"{dev}/brightness"), _read_int(f"{dev}/max_brightness")
+    return round(100 * cur / top) if cur is not None and top else None
 
 
 def brightness_set(percent: int) -> int | None:
+    """El archivo de brillo es solo de root; logind deja cambiarlo a la sesion
+    activa sin permisos extra (lo mismo que usa brightnessctl por debajo)."""
+    dev = _backlight()
+    top = _read_int(f"{dev}/max_brightness") if dev else None
+    if not top:
+        return None
     percent = max(BRIGHTNESS_MIN, min(100, int(percent)))
-    _run(["brightnessctl", "set", f"{percent}%"])
+    _run(["busctl", "call", "org.freedesktop.login1", "/org/freedesktop/login1/session/auto",
+          "org.freedesktop.login1.Session", "SetBrightness", "ssu", "backlight", os.path.basename(dev),
+          str(round(top * percent / 100))])
     return brightness_get()
 
 
@@ -662,8 +704,8 @@ def _brightness(n: str, respond) -> bool:
             intent = ("rel", 10 if re.search(_UP, n) and not re.search(_DOWN, n) else -10)
         else:
             return False
-    if shutil.which("brightnessctl") is None:
-        respond(_sir("No tengo brightnessctl para controlar el brillo"))
+    if _backlight() is None:
+        respond(_sir("Esta pantalla no tiene control de brillo"))
         return True
     kind, value = intent
     current = brightness_get()

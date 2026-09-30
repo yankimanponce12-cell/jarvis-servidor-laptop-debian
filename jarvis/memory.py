@@ -1,6 +1,6 @@
 """Memoria persistente estilo Letta/MemGPT, pero liviana: sin base
 vectorial ni modelo de embeddings extra (la VRAM ya esta al limite con
-Whisper+XTTS+el agente). Dos niveles:
+Whisper+Piper+el agente). Dos niveles:
 
 - Memoria "core": datos fijos sobre el usuario que se inyectan enteros en
   cada prompt del agente. Chica a proposito. El agente NO la actualiza por

@@ -11,16 +11,16 @@ logger = logging.getLogger("jarvis.voice")
 
 # es-419 = español latinoamericano; el tono un poco mas grave (-p) le da aire
 # de mayordomo. Voz robotica pero funciona sin descargar modelos ni tener un
-# audio de referencia: es el motor de respaldo cuando XTTS/OpenVoice no estan.
+# audio de referencia: es el motor de respaldo cuando Piper no esta.
 _ARGS = ["-v", "es-419", "-s", "160", "-p", "35"]
 
 
 class SystemSpeaker:
-    """Motor de voz de respaldo: espeak-ng (paquete espeak-ng de Fedora)."""
+    """Motor de voz de respaldo: espeak-ng (paquete espeak-ng de Debian)."""
 
     def __init__(self):
         if shutil.which("espeak-ng") is None:
-            raise RuntimeError("Falta espeak-ng: sudo dnf install espeak-ng")
+            raise RuntimeError("Falta espeak-ng: sudo apt install espeak-ng")
 
     def speak(self, text: str, stop_event=None):
         wav = self.synthesize_wav_bytes(text)

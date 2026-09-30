@@ -1,4 +1,0 @@
-# voz clonada XTTS v2 (trae torch, varios GB). Opcional.
-coqui-tts[cuda,codec]
-# coqui-tts usa isin_mps_friendly, que transformers 5 quitó
-transformers>=4.57,<5

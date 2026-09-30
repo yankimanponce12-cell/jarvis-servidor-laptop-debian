@@ -19,8 +19,8 @@ const els = {
   voiceSettingsBtn: document.getElementById("voiceSettingsBtn"),
   voicePanel: document.getElementById("voicePanel"),
   voicePanelClose: document.getElementById("voicePanelClose"),
-  voiceOptionOpenvoice: document.getElementById("voiceOptionOpenvoice"),
-  voiceOptionXtts: document.getElementById("voiceOptionXtts"),
+  voiceOptionPiper: document.getElementById("voiceOptionPiper"),
+  voiceOptionSistema: document.getElementById("voiceOptionSistema"),
   voiceProgress: document.getElementById("voiceProgress"),
   voiceProgressLabel: document.getElementById("voiceProgressLabel"),
   voiceError: document.getElementById("voiceError"),
@@ -85,9 +85,9 @@ function stopSpeaking() {
   }
 }
 
-// Intenta traer el audio con la voz clonada de Jarvis (XTTS, la misma que
+// Intenta traer el audio con la voz de Jarvis (Piper, la misma que
 // suena por los parlantes de la PC) y reproducirlo. Devuelve true si sono,
-// false si algo fallo (servidor caido, XTTS todavia cargando, etc.) para
+// false si algo fallo (servidor caido, la voz todavia cargando, etc.) para
 // que el que llama pueda usar la voz del navegador como respaldo.
 async function speakWithJarvisVoice(text) {
   try {
@@ -130,7 +130,7 @@ function speakBrowser(text, onDone) {
   window.speechSynthesis.speak(utter);
 }
 
-// Voz de Jarvis (XTTS) primero; si no se pudo (PC apagada del lado del
+// Voz de Jarvis (Piper) primero; si no se pudo (PC apagada del lado del
 // modelo, error de red, etc.) se cae a la voz generica del navegador para
 // que el celular nunca se quede mudo.
 async function speak(text, onDone) {
@@ -360,13 +360,13 @@ els.lobotomizeBtn.addEventListener("click", async () => {
   }
 });
 
-// --- Configuracion de voz: elegir entre XTTS (clasica) y OpenVoice (rapida) ---
+// --- Configuracion de voz: elegir entre Piper (natural) y espeak (robotica) ---
 // El backend nunca tiene los dos motores cargados a la vez a proposito (ver
 // jarvis/voice_output.py): cambiar de voz dispara la carga en un hilo de
 // fondo y esta pantalla sondea /api/voice-engine cada segundo para saber
 // cuando termino, mostrando una barra de progreso mientras tanto (no hay
 // forma de saber el porcentaje real, asi que es indeterminada a proposito).
-const voiceOptionButtons = [els.voiceOptionOpenvoice, els.voiceOptionXtts].filter(Boolean);
+const voiceOptionButtons = [els.voiceOptionPiper, els.voiceOptionSistema].filter(Boolean);
 let voicePollTimer = null;
 
 function renderVoiceStatus(status) {
@@ -379,7 +379,7 @@ function renderVoiceStatus(status) {
 
   if (loading) {
     els.voiceProgress.classList.remove("hidden");
-    const label = loading === "xtts" ? "XTTS" : "OpenVoice";
+    const label = loading === "piper" ? "Piper" : "espeak";
     els.voiceProgressLabel.textContent = `Cargando ${label}...`;
   } else {
     els.voiceProgress.classList.add("hidden");
