@@ -445,6 +445,8 @@ class VoiceListener:
         # on_barge_in(texto) recibe lo que se oyo mientras tanto (ya confirmado por Whisper)
         self.barge_in_active = None
         self.on_barge_in = None
+        # lo pone main.py: is_echo(texto, inicio) dice si lo oido es la voz del propio Jarvis
+        self.is_echo = None
         # plática: tras una pregunta de Jarvis, la siguiente frase vale sin "Jarvis"
         self._follow_until = 0.0  # time.monotonic() hasta cuando puede EMPEZAR esa frase
         self._direct = False  # listen_and_transcribe() en curso: esa frase es suya, no de aqui
@@ -607,7 +609,10 @@ class VoiceListener:
                 for_jarvis = self._spotter.heard_final()
                 # ¿empezo dentro de la ventana de una pregunta? (1 s de margen por el
                 # silencio final que se recorta y la latencia de la cola)
-                started = time.monotonic() - audio.size / SAMPLE_RATE - 1.0
+                # inicio real de la frase: el Endpointer la cierra tras END_SILENCE_S de
+                # silencio y de ese silencio deja TAIL_KEEP_S en el audio
+                began = time.monotonic() - END_SILENCE_S - (audio.size / SAMPLE_RATE - TAIL_KEEP_S)
+                started = began - 1.0
                 follow_up = bool(audio.size) and not self._direct and started <= self._follow_until
                 self.last_follow_up = False
                 if audio.size and self._speaking():
@@ -616,8 +621,13 @@ class VoiceListener:
                     audio = audio[:0]
                 text = raw = ""
                 if follow_up and not self._speaking():
-                    self.close_follow_up()  # una sola respuesta por pregunta
                     raw = self._safe_transcribe(audio, language)
+                    if raw and self.is_echo is not None and self.is_echo(raw, began):
+                        _log_utterance(audio, for_jarvis, raw, "", "(eco de la voz de Jarvis, ignorado)")
+                        if yield_empty:
+                            yield ""
+                        continue  # la ventana sigue abierta para la respuesta de verdad
+                    self.close_follow_up()  # una sola respuesta por pregunta
                     text = (wakeword.with_wake_prefix(raw) or f"Jarvis, {raw}") if raw else ""
                     self.last_follow_up = bool(text)
                     _log_utterance(audio, for_jarvis, raw, text, "(respuesta a una pregunta de Jarvis)")
@@ -630,6 +640,11 @@ class VoiceListener:
                     # solo vale si Whisper tambien oyo "Jarvis" (Vosk da falsas alarmas)
                     raw = self._safe_transcribe(audio, language)
                     text = wakeword.with_wake_prefix(raw) or ""
+                    if text and self.is_echo is not None and self.is_echo(raw, began):
+                        _log_utterance(audio, for_jarvis, raw, "", "(eco de la voz de Jarvis, ignorado)")
+                        if yield_empty:
+                            yield ""
+                        continue
                 if audio.size:
                     _log_utterance(audio, for_jarvis, raw, text)
                 if text or yield_empty:

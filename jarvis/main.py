@@ -229,6 +229,7 @@ class Session:
         """Solo reparte: cada comando corre en su hilo, asi el microfono sigue
         escuchando mientras Jarvis trabaja o habla (para poder interrumpirlo)."""
         self.listener.barge_in_active = voice_output.is_speaking
+        self.listener.is_echo = voice_output.is_echo
         self.listener.on_barge_in = self._on_barge_in
         try:
             for text in self.listener.listen_forever(on_partial=self._on_partial, yield_empty=True):

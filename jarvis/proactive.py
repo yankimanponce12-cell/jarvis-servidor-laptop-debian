@@ -27,7 +27,8 @@ def greeting_for_time(now: datetime.datetime | None = None) -> str:
         momento = "Buenas tardes"
     else:
         momento = "Buenas noches"
-    return f"{momento}, señor. Jarvis en línea."
+    # sin decir "Jarvis": el microfono lo oye por las bocinas y despertaba al detector
+    return f"{momento}, señor. Todos los sistemas en línea."
 
 
 class ProactiveSpeaker:

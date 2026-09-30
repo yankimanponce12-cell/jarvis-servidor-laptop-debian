@@ -1,5 +1,9 @@
+import collections
+import difflib
 import logging
+import re
 import threading
+import time
 from pathlib import Path
 
 from . import voice_config
@@ -104,10 +108,12 @@ class VoiceEngine:
         with self._speak_lock:
             self.stop_event.clear()
             self.speaking_text = texto
+            started = time.monotonic()
             try:
                 self._hablar(texto)
             finally:
                 self.speaking_text = ""
+                _said.append((started, time.monotonic(), texto))
 
     def _hablar(self, texto: str):
         engine = voice_config.get_engine()
@@ -142,6 +148,45 @@ class VoiceEngine:
         except Exception as exc:
             logger.error(f"Motor de voz ({engine}) fallo al sintetizar audio para el telefono: {exc}")
             return b""
+
+# Lo que Jarvis dijo hace poco: (inicio, fin, texto). El microfono oye las
+# bocinas, y su propio saludo ("... Jarvis en linea") llegaba como una orden
+# con la palabra "Jarvis": parecia que arremedaba al usuario. Ver is_echo().
+_said: collections.deque = collections.deque(maxlen=20)
+ECHO_WINDOW_S = 20  # se compara con lo dicho en estos ultimos segundos
+ECHO_TAIL_S = 0.6  # una frase que EMPIEZA hasta esto despues de que se callo, es su cola
+ECHO_SIMILARITY = 0.55
+
+
+def _norm(text: str) -> str:
+    text = text.lower().translate(str.maketrans("áéíóúñü", "aeiounu"))
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", text)).strip()
+
+
+def is_echo(heard: str, started: float) -> bool:
+    """True si lo que oyo el microfono es la voz del propio Jarvis: empezo
+    mientras hablaba (o justo al callarse), o se parece a algo que dijo hace
+    poco. Las interrupciones de verdad ("Jarvis, callate" mientras habla) no
+    pasan por aqui: las atiende la ventana de interrupcion de listener.py."""
+    now = time.monotonic()
+    if _engine is not None and _engine.speaking_text:
+        return True  # sigue hablando
+    heard_n = _norm(heard)
+    for t0, t1, said in list(_said):
+        if now - t1 > ECHO_WINDOW_S:
+            continue
+        if t0 - 0.5 <= started <= t1 + ECHO_TAIL_S:
+            return True
+        # por contenido solo con 3+ palabras: un "si" suelto (respuesta real a
+        # "¿quiere musica?") no debe confundirse con su voz
+        said_n = _norm(said)
+        if len(heard_n.split()) >= 3 and said_n and (
+            f" {heard_n} " in f" {said_n} "
+            or difflib.SequenceMatcher(None, heard_n, said_n).ratio() >= ECHO_SIMILARITY
+        ):
+            return True
+    return False
+
 
 _engine: VoiceEngine | None = None
 # el hilo de voz (mic/wake word) y el del servidor HTTP para el telefono
