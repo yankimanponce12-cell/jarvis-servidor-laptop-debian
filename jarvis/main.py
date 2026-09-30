@@ -12,7 +12,7 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import logging
 
-from jarvis import agent, audio_focus, brain, demo, interrupt, llm, system, voice_config, voice_output, whatsapp
+from jarvis import agent, audio_focus, brain, demo, interrupt, llm, stt_gpu, system, voice_config, voice_output, whatsapp
 from jarvis import server as jarvis_server
 from jarvis.commands import handle_command
 from jarvis.hud import Hud
@@ -418,7 +418,7 @@ class Session:
 
     def shutdown(self):
         """Cierra todo lo que Jarvis pudo haber dejado corriendo (el Brave de
-        WhatsApp Web, el llama-server propio) para
+        WhatsApp Web, el llama-server y el whisper-server propios) para
         que no quede nada huerfano despues de decir 'adios' o Ctrl+Q."""
         with self._close_lock:
             if self._closed:
@@ -428,6 +428,7 @@ class Session:
         audio_focus.restore_now()  # que la musica no quede atenuada
         whatsapp.close()
         llm.shutdown()
+        stt_gpu.shutdown()
 
 
 def main():

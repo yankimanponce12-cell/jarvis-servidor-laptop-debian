@@ -1,15 +1,17 @@
 import collections
+import datetime
 import json
 import os
 import queue
 import re
 import threading
+import wave
 from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 
-from jarvis import mic_config, wakeword
+from jarvis import mic_config, stt_gpu, wakeword
 
 SAMPLE_RATE = 16000
 FRAME = 512  # muestras por trama de audio (32 ms): el tamaño que exige el VAD Silero a 16 kHz
@@ -377,13 +379,50 @@ class Endpointer:
         return None
 
 
+# --- registro de lo que se oye (para diagnosticar cuando no entiende) --------
+LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+# JARVIS_GUARDAR_AUDIO=1 guarda ademas el audio de las ultimas frases en
+# logs/audio/ (apagado por defecto: son grabaciones de voz)
+SAVE_AUDIO = os.environ.get("JARVIS_GUARDAR_AUDIO") == "1"
+SAVE_AUDIO_KEEP = 30
+
+
+def _log_utterance(audio: np.ndarray, vosk: bool, whisper: str, final: str, note: str = ""):
+    """Una linea por frase en logs/escucha.log: duracion, nivel, si Vosk oyo
+    "jarvis", que escribio Whisper y que se le paso a Jarvis."""
+    try:
+        LOG_DIR.mkdir(exist_ok=True)
+        now = datetime.datetime.now()
+        db = mic_config.rms_to_db(float(np.sqrt(np.mean(audio**2)))) if audio.size else float("-inf")
+        line = (f"{now:%Y-%m-%d %H:%M:%S} dur={audio.size / SAMPLE_RATE:4.1f}s nivel={db:5.1f}dB "
+                f"vosk={'SI' if vosk else 'no'} whisper={whisper!r} -> {final!r}{' ' + note if note else ''}\n")
+        with open(LOG_DIR / "escucha.log", "a", encoding="utf-8") as f:
+            f.write(line)
+        if SAVE_AUDIO and audio.size:
+            d = LOG_DIR / "audio"
+            d.mkdir(exist_ok=True)
+            with wave.open(str(d / f"{now:%Y%m%d-%H%M%S}.wav"), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(SAMPLE_RATE)
+                w.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+            for old in sorted(d.glob("*.wav"))[:-SAVE_AUDIO_KEEP]:
+                old.unlink(missing_ok=True)
+    except Exception:
+        pass  # el registro nunca debe tirar la escucha
+
+
 class VoiceListener:
     def __init__(self, model_size=None, device=None, compute_type=None):
         # el import de faster_whisper (en _load_whisper) es diferido y no al
         # nivel del modulo: tarda ~2.8s por si solo y main.py importa este
         # modulo al arrancar; asi se paga recien al construir VoiceListener(),
         # que ya pasa en un hilo de fondo con la interfaz visible.
-        # "base" y no "small": en esta CPU small tarda ~7 s por frase y base ~2 s
+        # Principal: Whisper small en la grafica (stt_gpu.py, ~2 s y entiende
+        # mucho mejor). faster-whisper "base" en la CPU queda cargado de
+        # respaldo por si el servidor de la grafica falla (small en CPU: ~7 s).
+        self._gpu = stt_gpu.start(WAKE_WORD_PROMPT)
+        print("Whisper small en la gráfica (Vulkan)." if self._gpu else "Whisper en la CPU (sin la gráfica).")
         model_size = model_size or os.environ.get("JARVIS_WHISPER_MODEL", "base")
         if device is None or compute_type is None:
             auto_device, auto_compute_type = _pick_device_and_compute_type()
@@ -476,9 +515,16 @@ class VoiceListener:
         lanza excepcion hacia el llamador: una falla no debe tirar abajo todo
         Jarvis - simplemente se descarta esa frase y se sigue escuchando,
         igual que si se hubiera transcrito vacia."""
+        audio = condition_audio(audio)
+        if self._gpu:
+            try:
+                return clean_transcript(stt_gpu.transcribe(audio, SAMPLE_RATE))
+            except Exception as exc:
+                print(f"Whisper en la gráfica no respondió ({exc}); sigo en la CPU.")
+                self._gpu = False
         try:
             segments, _ = self.model.transcribe(
-                condition_audio(audio),
+                audio,
                 language=language,
                 initial_prompt=WAKE_WORD_PROMPT,
                 # sin esto la "Jarvis" dicha en español salia "Tarmis", "Farvis"...
@@ -504,7 +550,9 @@ class VoiceListener:
             audio = self._next_utterance(q, endpointer)
         if audio.size == 0:
             return ""
-        return self._safe_transcribe(audio, language)
+        text = self._safe_transcribe(audio, language)
+        _log_utterance(audio, False, text, text, "(respuesta a una pregunta)")
+        return text
 
     def flush_pending_audio(self):
         """Descarta el audio acumulado en el buffer del microfono (por ejemplo
@@ -540,12 +588,15 @@ class VoiceListener:
                     # frase que termino con Jarvis hablando: es su eco (una orden
                     # real ya lo habria cortado con las palabras clave)
                     audio = audio[:0]
-                text = ""
+                text = raw = ""
                 if audio.size and for_jarvis:
                     if on_partial is not None:
                         on_partial("Jarvis…")  # la interfaz baja la musica mientras Whisper transcribe
                     # solo vale si Whisper tambien oyo "Jarvis" (Vosk da falsas alarmas)
-                    text = wakeword.with_wake_prefix(self._safe_transcribe(audio, language)) or ""
+                    raw = self._safe_transcribe(audio, language)
+                    text = wakeword.with_wake_prefix(raw) or ""
+                if audio.size:
+                    _log_utterance(audio, for_jarvis, raw, text)
                 if text or yield_empty:
                     yield text
 

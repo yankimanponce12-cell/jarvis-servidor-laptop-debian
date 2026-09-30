@@ -107,6 +107,12 @@ tui.py + hud.py: interfaz de terminal (Textual)
 
 ### Por qué así (medido en el Ryzen 3 2200U)
 
+- **Whisper en la gráfica:** whisper.cpp compilado con Vulkan (`stt_gpu.py`),
+  modelo `small`, ventana de 15 s y beam 5: ~2 s por frase y entiende mucho
+  mejor que `base` en CPU (que se equivocaba en "pon música de rock", "80%",
+  "mándale un mensaje a mi mamá"). Si no arranca, se usa faster-whisper en CPU.
+  Cada frase oída queda en `logs/escucha.log` (con `JARVIS_GUARDAR_AUDIO=1`,
+  también el audio de las últimas 30 en `logs/audio/`).
 - **Escucha:** Whisper tarda lo mismo con una frase corta que con una larga
   (siempre procesa una ventana de 30 s): `base` ~2 s, `small` ~7 s. Por eso ya
   no transcribe todo lo que oye: Vosk con una gramatica de una sola palabra
@@ -147,6 +153,10 @@ sudo apt install -y python3-venv libportaudio2 playerctl pulseaudio-utils espeak
   (`JARVIS_LLAMA_SERVER_GPU`, `JARVIS_LLAMA_SERVER`, `JARVIS_MODEL`); se cambian con
   `JARVIS_LLAMA_SERVER` y `JARVIS_MODEL` (o `JARVIS_LLM_URL` si ya tienes un
   servidor corriendo). `JARVIS_LLM_THREADS` cambia los hilos (2 por defecto).
+- whisper.cpp con Vulkan (opcional, recomendado): se compila sin sudo con
+  `cmake` de pip y el SDK de Vulkan de LunarG en una carpeta local:
+  `cmake -B build-vk -DGGML_VULKAN=ON -DVulkan_LIBRARY=/usr/lib/x86_64-linux-gnu/libvulkan.so.1 ...`
+  y el modelo `ggml-small.bin` en `~/modelos/whisper/`.
 - Vosk: el modelo `vosk-model-small-es-0.42` en `~/modelos/` (o
   `JARVIS_VOSK_MODEL`).
 - Whisper: `JARVIS_WHISPER_MODEL` cambia el modelo (`base` por defecto; `small`
