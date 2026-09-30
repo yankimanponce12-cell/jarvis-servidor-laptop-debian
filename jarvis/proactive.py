@@ -76,16 +76,16 @@ class ProactiveSpeaker:
         # no habla nada por voz, solo actualiza el reloj y el HUD de la PC;
         # si falla (sin internet, reloj apagado, etc.) simplemente no actualiza
         try:
-            datos = weather.get_current_compact()
+            datos = weather.push_to_hud(self._hud)  # titulo y panel animado de la interfaz
         except Exception:
             datos = None
         if not datos:
             return
         watch.send_weather(datos["temp"], datos["precip"], datos["humidity"], datos["pressure"], datos["wind"])
-        if self._hud:
-            self._hud.set_weather(datos["temp"], datos["desc"])
 
     def _run(self):
+        self._last_weather_check = time.time()
+        self._push_weather_to_watch()  # el panel de clima no espera al primer ciclo
         while not self._stop_event.wait(CHECK_INTERVAL_SECONDS):
             now = time.time()
             if now - self._last_weather_check >= WEATHER_CHECK_INTERVAL_SECONDS:

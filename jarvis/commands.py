@@ -1,7 +1,7 @@
 import datetime
 import re
 
-from . import actions, agent, brain, memory, weather, whatsapp
+from . import actions, agent, brain, demo, interrupt, memory, music, system, weather, whatsapp
 
 EXIT_WORDS = [
     "adios", "adios jarvis", "hasta luego", "cierra jarvis",
@@ -11,7 +11,10 @@ EXIT_WORDS = [
 LEADING_ARTICLES = re.compile(r"^(el|la|los|las|un|una)\s+")
 _MSG_VERB_RE = re.compile(r"^(?:mandale|manda|enviale|envia)\s+(?:un\s+)?mensaje\s+a\s+(.+)$")
 _MSG_WRITE_RE = re.compile(r"^escribele\s+(?:un\s+mensaje\s+)?a\s+(.+)$")
-_WEATHER_CITY_RE = re.compile(r"\bclima\b.*?\ben\s+(.+)$")
+_HORA_RE = re.compile(
+    r"\bque hora(?:s)? (?:es|son|tenemos|tienes|hay)\b|\b(?:dime|dame|decime|dinos|sabes|tienes|necesito saber|quiero saber|me dices)\b.*\bla hora\b"
+    r"|\bla hora (?:actual|exacta)\b|\bque hora(?:s)? (?:van|llevamos)\b"
+)
 # la memoria (jarvis/memory.py) NO pasa por el agente con tool-calling: se
 # probo y con muchas herramientas a la vez (el agente ya tiene 7 propias)
 # Qwen2.5:7b se vuelve poco confiable (ver notas en agent.py). Se detecta
@@ -25,27 +28,33 @@ _MEMORY_RECALL_RE = re.compile(
     r"\bque\s+(?:recordas|recuerdas|sabes)\b.*"
     r"\b(?:de mi|sobre mi|de lo que|que te dije|que dije|que hablamos|que paso|que conversamos|acerca de mi)\b"
 )
+# "hazme una demo" ejecuta la demostracion EN VIVO (demo.py); "que puedes
+# hacer" solo describe las funciones con un guion fijo
+LIVE_DEMO_PHRASES = [
+    "demo", "demostracion", "hazme una demo", "hagamos una demo", "dame una demostracion",
+    "hazme una demostracion", "muestrame que puedes hacer", "muestrame tus funciones",
+]
 DEMO_PHRASES = [
-    "que puedes hacer", "que sabes hacer", "hazme una demo", "hagamos una demo",
-    "muestrame que puedes hacer", "muestrame tus funciones", "que acciones tienes",
-    "cuales son tus funciones", "dame una demostracion", "hazme una demostracion",
+    "que puedes hacer", "que sabes hacer", "que acciones tienes", "cuales son tus funciones",
+    "que funciones tienes",
 ]
 # guion fijo (no generado por IA): para una demo importa que sea preciso
 # sobre lo que Jarvis realmente puede hacer, no que suene mas natural a
 # costa de arriesgarse a que el agente invente una funcion que no existe
 DEMO_TEXT = (
-    "Buenas, señor. Le muestro rápido lo que puedo hacer. Puedo mandar "
-    "mensajes de WhatsApp por usted, dictándolos por voz. Busco y "
-    "reproduzco lo que quiera en YouTube, o hago búsquedas en Google. "
-    "Abro y cierro aplicaciones de la computadora, controlo el volumen, y "
-    "le digo la hora o la fecha cuando la necesite. También consulto el "
-    "clima, de aquí o de cualquier ciudad que me diga. Si quiere "
-    "conectarse desde el celular, le muestro un código QR para "
-    "controlarme desde ahí. Y tengo memoria: me acuerdo de su nombre, de "
-    "lo que me pida que anote, y puedo buscarlo después si se lo "
-    "pregunta. Todo lo demás, si no encaja en ninguna de estas acciones, "
-    "lo converso con usted directamente, como ahora mismo. Esa es la "
-    "demostración, señor. A sus órdenes."
+    "Buenas, señor. Le cuento lo que puedo hacer. Mando mensajes de "
+    "WhatsApp dictados por voz. Abro Spotify y pongo canciones de un artista "
+    "o de un género, como rock o AC DC. Busco y reproduzco lo que quiera en "
+    "YouTube, o hago búsquedas en Google. Abro y cierro aplicaciones, y controlo el "
+    "volumen, incluso a un porcentaje exacto, y el brillo de la pantalla. "
+    "Enciendo y apago el Wi-Fi y el Bluetooth, escaneo dispositivos "
+    "Bluetooth cercanos, se los leo, y me empareja con el que elija. Le "
+    "digo la batería, la temperatura y el estado del procesador, la memoria "
+    "y la tarjeta gráfica, la hora, la fecha, el clima y la probabilidad de lluvia. Controlo la música "
+    "que esté sonando. Si quiere controlarme desde el celular, le muestro un "
+    "código QR. Tengo memoria: me acuerdo de su nombre y de lo que me pida "
+    "anotar. Y todo lo demás lo converso con usted. Si quiere verlo en "
+    "acción, dígame: hazme una demo."
 )
 _DIAS = ["lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"]
 _MESES = [
@@ -132,6 +141,17 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
         respond(_sir("Hasta luego"))
         return False
 
+    # "pausa", "silencio", "para la musica", "callate"... (por voz, main.py ya
+    # las atiende antes para cortar a Jarvis si esta hablando; esto cubre lo
+    # escrito y el celular)
+    if interrupt.is_stop_command(t):
+        respond(_sir("Pausado") if system.pause_all() else _sir("No hay nada sonando"))
+        return True
+
+    if _matches_any(t, LIVE_DEMO_PHRASES):
+        demo.run_demo(respond, hud=hud, handle_command=handle_command)
+        return True
+
     if _matches_any(t, DEMO_PHRASES):
         respond(DEMO_TEXT)
         return True
@@ -142,13 +162,25 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
         else:
             try:
                 from jarvis import server as jarvis_server
-                from jarvis.qr_share import mobile_qr_data_uri
+                from jarvis.qr_share import mobile_qr_text
 
-                hud.show_qr(mobile_qr_data_uri(), jarvis_server.TOKEN)
+                hud.show_qr(mobile_qr_text(), jarvis_server.TOKEN)
                 pin_hablado = " ".join(jarvis_server.TOKEN)
                 respond(_sir(f"Ahí tiene el código QR. Si prefiere tipearlo, el PIN es {pin_hablado}"))
             except Exception:
                 respond(_sir("No pude generar el código QR"))
+        return True
+
+    # controles del sistema (volumen exacto, brillo, wifi, bluetooth, bateria,
+    # estado, medios). Va ANTES de las ramas de "pon ..."/"busca ..."/"abre
+    # ...", que si no se comerian frases como "pon el volumen al 50" o "busca
+    # dispositivos bluetooth".
+    if system.handle(t, text, respond, escuchar):
+        return True
+
+    # Spotify (ncspot): "abre spotify y pon canciones de rock", "pon canciones
+    # de acdc". Tambien antes de "pon ..." (que iria a YouTube) y "abre ...".
+    if music.handle(t, text, respond, escuchar):
         return True
 
     contacto = _extract_message_contact(t)
@@ -226,7 +258,9 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
         respond(_sir("Silenciando"))
         return True
 
-    if "que hora es" in t or "dime la hora" in t or "que horas son" in t:
+    # la hora se responde SIEMPRE por reglas: dejada al modelo, a veces se la
+    # inventaba en vez de llamar a la herramienta
+    if _HORA_RE.search(t):
         now = datetime.datetime.now().strftime("%H:%M")
         respond(_sir(f"Son las {now}"))
         return True
@@ -236,11 +270,14 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
         respond(_sir(f"Hoy es {_DIAS[now.weekday()]} {now.day} de {_MESES[now.month - 1]}"))
         return True
 
-    if "clima" in t or "temperatura" in t or "va a llover" in t or "esta lloviendo" in t:
-        city_match = _WEATHER_CITY_RE.search(t)
-        city = _clean(city_match.group(1)) if city_match else None
+    # clima y lluvia: weather.py separa "esta lloviendo" (ahora), "probabilidad
+    # de lluvia" (el numero) y "va a llover al rato / mas tarde / manana" (si o
+    # no + la ventana que se entendio), y lee la ciudad y el momento de la frase
+    if weather.is_weather_request(t):
         respond(_sir("Consultando el clima"))
-        respond(_sir(weather.get_weather(city)))
+        answer = weather.answer(t)
+        weather.push_to_hud(hud)  # el panel de clima se actualiza mientras Jarvis habla
+        respond(_sir(answer))
         return True
 
     name_match = _NAME_RE.search(t)

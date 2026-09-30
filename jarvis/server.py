@@ -7,7 +7,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from jarvis import agent, brain, voice_output
+from jarvis import agent, brain, voice_config, voice_output
 from jarvis.commands import handle_command
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -200,8 +200,8 @@ def api_voice_engine_set():
         return jsonify({"error": "token invalido"}), 401
     data = request.get_json(silent=True) or {}
     engine = data.get("engine")
-    if engine not in ("xtts", "openvoice"):
-        return jsonify({"error": "motor invalido, debe ser 'xtts' u 'openvoice'"}), 400
+    if engine not in voice_config.VALID_ENGINES:
+        return jsonify({"error": f"motor invalido, debe ser uno de {list(voice_config.VALID_ENGINES)}"}), 400
     voice_output.switch_engine(engine)
     return jsonify({"ok": True})
 
@@ -243,14 +243,8 @@ def api_reset():
 
 def run_server(host="0.0.0.0", port=DEFAULT_PORT):
     cert_file, key_file = _get_or_create_cert()
-    print(f"[jarvis.server] Servidor local escuchando en https://{_local_ip()}:{port}")
-    print(f"[jarvis.server] Abrí esto en el navegador del celular (misma wifi):")
-    print(f"[jarvis.server]   {mobile_url()}")
-    print(f"[jarvis.server] (o decile a Jarvis 'mándame el QR' para escanearlo desde el HUD)")
-    print(f"[jarvis.server] El certificado es autofirmado: el navegador va a avisar que la")
-    print(f"[jarvis.server] conexion 'no es privada' la primera vez. Es esperado (no hay una")
-    print(f"[jarvis.server] autoridad certificadora detras) -> 'Avanzado' > 'Continuar'. Sin")
-    print(f"[jarvis.server] HTTPS el navegador bloquea el microfono por completo.")
+    print(f"[jarvis.server] Panel móvil (misma wifi): {mobile_url()}")
+    print("[jarvis.server] Certificado autofirmado: el navegador avisará la primera vez (Avanzado > Continuar).")
     app.run(
         host=host,
         port=port,

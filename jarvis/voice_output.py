@@ -4,6 +4,7 @@ from pathlib import Path
 
 from . import voice_config
 from .tts_openvoice import OpenVoiceClient
+from .tts_system import SystemSpeaker
 from .tts_xtts import XTTSSpeaker
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +27,8 @@ def _setup_logging():
 
 
 class VoiceEngine:
-    """Motor de voz con DOS opciones intercambiables: XTTS v2 (local,
+    """Motor de voz con TRES opciones intercambiables (la tercera, "sistema",
+    es espeak-ng: respaldo sin modelos): XTTS v2 (local,
     clonado end-to-end, mas fiel pero pesado: ~2GB VRAM, ~3s por oracion) y
     OpenVoice V2 (subprocess aparte, ~4x mas rapido pero se parece un poco
     menos a la voz de referencia).
@@ -42,14 +44,24 @@ class VoiceEngine:
         self._lock = threading.Lock()
         self._xtts: XTTSSpeaker | None = None
         self._openvoice: OpenVoiceClient | None = None
+        self._system: SystemSpeaker | None = None
         self._active_engine: str | None = None
         self._loading_engine: str | None = None
         self._load_error: str | None = None
+        # una sola voz a la vez: el saludo, una respuesta y un aviso proactivo
+        # podian hablar encimados, y dos hilos usando XTTS a la vez rompian la
+        # sintesis ("size of tensor a (80) must match b (49)")
+        self._speak_lock = threading.RLock()
+        self.stop_event = threading.Event()
+        self.speaking_text = ""  # lo que se esta diciendo (para no confundir el eco con una orden)
 
     def _load(self, engine: str):
         if engine == "xtts":
             if self._xtts is None:
                 self._xtts = XTTSSpeaker()
+        elif engine == "sistema":
+            if self._system is None:
+                self._system = SystemSpeaker()
         else:
             if self._openvoice is None:
                 self._openvoice = OpenVoiceClient()
@@ -96,27 +108,50 @@ class VoiceEngine:
             "error": self._load_error,
         }
 
+    def _speaker(self, engine: str):
+        return {"xtts": self._xtts, "openvoice": self._openvoice, "sistema": self._system}[engine]
+
     def hablar(self, texto: str):
         if not texto:
             return
+        with self._speak_lock:
+            self.stop_event.clear()
+            self.speaking_text = texto
+            try:
+                self._hablar(texto)
+            finally:
+                self.speaking_text = ""
+
+    def _hablar(self, texto: str):
         engine = voice_config.get_engine()
         try:
             self.ensure_loaded(engine)
-            if engine == "xtts":
-                self._xtts.speak(texto)
-            else:
-                self._openvoice.speak(texto)
+            self._speaker(engine).speak(texto, stop_event=self.stop_event)
+            return
         except Exception as exc:
             logger.error(f"Motor de voz ({engine}) fallo, este mensaje no se pudo hablar: {exc}")
+        if engine != voice_config.FALLBACK_ENGINE and not self.stop_event.is_set():
+            # que Jarvis nunca se quede mudo si el motor elegido no carga
+            # (falta el audio de referencia, OpenVoice caido, etc.)
+            try:
+                self.ensure_loaded(voice_config.FALLBACK_ENGINE)
+                self._system.speak(texto, stop_event=self.stop_event)
+            except Exception as exc:
+                logger.error(f"Tampoco funciono la voz de respaldo: {exc}")
+
+    def stop(self) -> bool:
+        """Corta lo que se este diciendo. True si habia algo sonando."""
+        if not self.speaking_text:
+            return False
+        self.stop_event.set()
+        return True
 
     def synthesize_wav_bytes(self, texto: str) -> bytes:
         engine = voice_config.get_engine()
         try:
             self.ensure_loaded(engine)
-            if engine == "xtts":
-                return self._xtts.synthesize_wav_bytes(texto)
-            else:
-                return self._openvoice.synthesize_wav_bytes(texto)
+            with self._speak_lock:  # la misma GPU/modelo que hablar()
+                return self._speaker(engine).synthesize_wav_bytes(texto)
         except Exception as exc:
             logger.error(f"Motor de voz ({engine}) fallo al sintetizar audio para el telefono: {exc}")
             return b""
@@ -153,6 +188,19 @@ def hablar(texto: str):
     """Funcion central para que cualquier parte de Jarvis hable. Si iniciar()
     no se llamo antes, se inicializa aqui mismo (mas lento la primera vez)."""
     iniciar().hablar(texto)
+
+
+def stop() -> bool:
+    """Calla a Jarvis a mitad de frase ("Jarvis, callate"). True si estaba hablando."""
+    return _engine is not None and _engine.stop()
+
+
+def is_speaking() -> bool:
+    return _engine is not None and bool(_engine.speaking_text)
+
+
+def speaking_text() -> str:
+    return _engine.speaking_text if _engine is not None else ""
 
 
 def synthesize_wav_bytes(texto: str) -> bytes:

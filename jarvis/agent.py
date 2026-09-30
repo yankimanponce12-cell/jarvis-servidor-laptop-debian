@@ -1,11 +1,11 @@
 """El "cerebro" agente de Jarvis: en vez del brain.ask() plano de antes
 (solo charla, sin poder hacer nada), este usa un modelo con tool-calling
-(Qwen2.5:7b via Ollama) que decide por si solo si hace falta ejecutar una
+(Qwen2.5:7b via llama.cpp) que decide por si solo si hace falta ejecutar una
 accion real (WhatsApp, YouTube, clima, apps, volumen) o si alcanza con
 responder charlando.
 
 Se prueban Hermes3 (3b y 8b) y Phi-4-mini antes de esto: ninguno devolvia
-tool_calls confiables via la API de Ollama (JSON roto o de plano ignoraban
+tool_calls confiables via la API de Ollama (entonces se usaba Ollama; hoy llama.cpp) (JSON roto o de plano ignoraban
 el pedido). Qwen2.5:7b fue el unico que acerto 8/8 en la prueba empirica
 (ver carpeta "prueba hermes agent")... con ESTA lista de 7 herramientas y
 ESTE prompt corto. Se probo agregar 3 herramientas mas de memoria y un
@@ -24,12 +24,9 @@ Solo lo que no matchea ninguna regla llega hasta el agente."""
 
 import datetime
 import json
-import urllib.request
+import re
 
-from jarvis import actions, memory, weather, whatsapp
-
-OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
-MODEL = "qwen2.5:7b"
+from jarvis import actions, llm, memory, weather, whatsapp
 
 MAX_TURNS = 8  # conversacion de corto plazo (se resetea con lobotomizar); lo de largo plazo vive en memory.py
 
@@ -43,6 +40,56 @@ BASE_SYSTEM_PROMPT = (
     "correspondiente. Si es charla general, respondes vos mismo en 1-2 "
     "oraciones, sin markdown."
 )
+
+# ---- largo de la respuesta ---------------------------------------------------
+# Por defecto Jarvis contesta corto (1-2 frases, prompt de arriba). Cuando se le
+# pide explicar, contar, opinar o dar consejos contesta un parrafo (4-6 frases)
+# completo, en vez de recortar a la fuerza una explicacion a la mitad. Eso va
+# por una llamada SIN herramientas y con su propio prompt: el de arriba no se
+# toca porque el tool-calling es sensible a su redaccion (ver comentario).
+LONG_SYSTEM_PROMPT = (
+    "Tu nombre es Jarvis, un asistente de voz en español inspirado en el "
+    "JARVIS de Iron Man: formal, ingenioso, te diriges al usuario como "
+    "'señor'. Lo que digas se lee en voz alta, así que habla en prosa "
+    "natural: sin listas, sin numeración, sin asteriscos ni markdown y sin "
+    "emojis. Llámalo solo 'señor', sin decir su nombre completo. El "
+    "usuario te pidió que le expliques o le cuentes algo: responde con un "
+    "párrafo de tres a cinco oraciones no muy largas (unas 60 a 90 palabras "
+    "en total), con lo más interesante o útil y sin rodeos, y termina "
+    "siempre la idea; nunca dejes una explicación a medias. Si pide varios "
+    "puntos (por ejemplo tres consejos), dilos todos dentro del párrafo "
+    "(primero, segundo, tercero)."
+)
+LONG_MAX_TOKENS = 320  # con holgura sobre ~90 palabras; si igual se pasa, llm.chat recorta a la ultima frase completa
+LONG_MAX_SENTENCES = 7
+
+_ACCENTS = str.maketrans("áéíóúñ", "aeioun")
+_WANTS_LONG = re.compile(
+    r"\b(?:hablame|platicame|cuentame|explicame|describeme|ilustrame)\b"
+    r"|\bque\s+(?:opinas|piensas|sabes)\b"
+    r"|\bcomo\s+(?:funciona|funcionan|se\s+hace|se\s+hacen|se\s+forma|se\s+formo|surgio|nacio|empezo)\b"
+    r"|\bpor\s+que\b"
+    r"|\b(?:dame|dime)\s+(?:\w+\s+){0,2}(?:consejos?|ideas?|razones|ejemplos?|pasos|recomendaciones|tips|formas|maneras|opciones|datos|curiosidades)\b"
+    r"|\b(?:historia|biografia|resumen|origen|detalles|curiosidades)\s+(?:de|del|sobre)\b|\b(?:a fondo|en detalle|con detalle)\b"
+    r"|^(?:y\s+)?(?:que\s+mas|sigue|continua|cuentame\s+mas|dime\s+mas|y\s+luego|y\s+despues)\b"
+)
+# pedidos de brevedad explicita, y chistes/adivinanzas (que son cortos), ganan
+_WANTS_SHORT = re.compile(
+    r"\b(?:brevemente|en corto|resumid[oa]|en una frase|en pocas palabras|en una palabra|rapido|breve|corto|corta"
+    r"|chiste|broma|adivinanza|acertijo|refran)\b"
+)
+# con un verbo de accion se deja decidir al agente con herramientas (ej. "ponme un video de como funciona un motor")
+_ACTION_WORDS = re.compile(
+    r"\b(?:abre|abrir|abreme|cierra|cerrar|manda|mandale|envia|enviale|escribele|mensaje|whatsapp|youtube|"
+    r"pon|ponme|poner|reproduce|reproduceme|busca|buscame|volumen|silencia|brillo|wifi|bluetooth)\b"
+)
+
+
+def wants_long_answer(text: str) -> bool:
+    """True si la peticion pide explicar/contar/opinar (respuesta de un parrafo)."""
+    t = text.lower().strip().strip(".,!?¿¡").translate(_ACCENTS)
+    return bool(_WANTS_LONG.search(t)) and not _WANTS_SHORT.search(t) and not _ACTION_WORDS.search(t)
+
 
 TOOLS = [
     {"type": "function", "function": {
@@ -83,9 +130,10 @@ TOOLS = [
     }},
     {"type": "function", "function": {
         "name": "controlar_volumen",
-        "description": "Sube, baja o silencia el volumen del sistema",
+        "description": "Sube, baja, silencia o fija el volumen del sistema (fijar = porcentaje exacto)",
         "parameters": {"type": "object", "properties": {
-            "accion": {"type": "string", "enum": ["subir", "bajar", "silenciar"]},
+            "accion": {"type": "string", "enum": ["subir", "bajar", "silenciar", "fijar"]},
+            "nivel": {"type": "integer", "description": "Porcentaje 0-100, solo para fijar"},
         }, "required": ["accion"]},
     }},
     {"type": "function", "function": {
@@ -105,22 +153,24 @@ def _chat(messages, tools=None):
     memoria = memory.get_core_memory_text()
     if memoria:
         system = f"{system}\n\n{memoria}"
-    payload = {
-        "model": MODEL,
-        "messages": [{"role": "system", "content": system}] + messages,
-        "stream": False,
-        "keep_alive": "30m",
-        "options": {"num_predict": 150},
-    }
-    if tools:
-        payload["tools"] = tools
-    req = urllib.request.Request(
-        OLLAMA_CHAT_URL, data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+    msg = llm.chat(
+        [{"role": "system", "content": system}] + messages,
+        tools=tools,
+        max_tokens=160,
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.load(resp)
-    return data["message"]
+    if msg.get("content") and not msg.get("tool_calls"):
+        msg["content"] = llm.limit_sentences(msg["content"])  # red de seguridad: hasta 3 frases completas
+    return msg
+
+
+def _converse(history: list) -> str:
+    """Respuesta de un parrafo completo (sin herramientas) para lo que pide explicacion."""
+    system = LONG_SYSTEM_PROMPT
+    memoria = memory.get_core_memory_text()
+    if memoria:
+        system = f"{system}\n\n{memoria}"
+    msg = llm.chat([{"role": "system", "content": system}] + history, max_tokens=LONG_MAX_TOKENS)
+    return llm.limit_sentences(msg.get("content") or "", n=LONG_MAX_SENTENCES)
 
 
 class Agent:
@@ -129,6 +179,10 @@ class Agent:
 
     def reset(self):
         self.messages = []
+
+    def _plain_history(self) -> list:
+        """La charla sin los mensajes de herramientas (la llamada larga no lleva tools)."""
+        return [m for m in self.messages if m["role"] in ("user", "assistant") and m.get("content") and not m.get("tool_calls")]
 
     def _trim_history(self):
         max_messages = MAX_TURNS * 2
@@ -200,7 +254,10 @@ class Agent:
 
         if name == "controlar_volumen":
             accion = args.get("accion")
-            if accion == "subir":
+            if accion == "fijar" and str(args.get("nivel", "")).lstrip("-").isdigit():
+                vol = actions.set_volume(int(args["nivel"]))
+                respond(_sir(f"Volumen al {vol[0]} por ciento" if vol else "No pude cambiar el volumen"))
+            elif accion == "subir":
                 actions.volume_up()
                 respond(_sir("Subiendo volumen"))
             elif accion == "bajar":
@@ -220,14 +277,25 @@ class Agent:
 
     def ask(self, text: str, respond=print, escuchar=None, hud=None):
         """Punto de entrada: le pasa el texto al agente y deja que decida.
-        Si algo falla (Ollama caido, respuesta rara), no lanza excepcion:
+        Si algo falla (llama.cpp caido, respuesta rara), no lanza excepcion:
         cae a una respuesta generica, igual que hacia brain.ask()."""
         self.messages.append({"role": "user", "content": text})
+        if wants_long_answer(text):
+            try:
+                texto = _converse(self._plain_history())
+            except Exception:
+                self.messages.pop()
+                respond(_sir("No pude conectarme con mi modelo de IA local. Revise que llama.cpp esté corriendo"))
+                return
+            respond(texto or _sir("No entendí bien, intente de nuevo"))
+            self.messages.append({"role": "assistant", "content": texto})
+            self._trim_history()
+            return
         try:
             msg = _chat(self.messages, tools=TOOLS)
         except Exception:
             self.messages.pop()
-            respond(_sir("No pude conectarme con mi modelo de IA local. Revise que Ollama esté corriendo"))
+            respond(_sir("No pude conectarme con mi modelo de IA local. Revise que llama.cpp esté corriendo"))
             return
 
         tool_calls = msg.get("tool_calls") or []
@@ -259,7 +327,7 @@ class Agent:
             respond(_sir("Algo falló al ejecutar esa acción"))
             resultado = ""
 
-        self.messages.append({"role": "tool", "content": resultado or ""})
+        self.messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": resultado or ""})
         self._trim_history()
 
 

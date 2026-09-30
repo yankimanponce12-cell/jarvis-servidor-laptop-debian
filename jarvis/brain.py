@@ -1,12 +1,8 @@
-import json
-import urllib.request
-
-OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
-MODEL = "llama3.2:3b"
+from jarvis import llm
 
 SYSTEM_PROMPT = (
-    # "Tu nombre es X" en vez de arrancar con "Eres Jarvis": con el modelo
-    # chico que se usa aca (llama3.2:3b) esa segunda forma se presta a que
+    # "Tu nombre es X" en vez de arrancar con "Eres Jarvis": con modelos
+    # chicos (probado con llama3.2:3b) esa segunda forma se presta a que
     # el modelo entienda "Eres" como si fuera el nombre y "Jarvis" un
     # apellido/descripcion aparte (se repitio consistente en pruebas:
     # "Me llamo Eres, señor..."). La aclaracion explicita entre parentesis
@@ -33,29 +29,15 @@ class Brain:
 
     def ask(self, question: str) -> str:
         self.messages.append({"role": "user", "content": question})
-        payload = json.dumps(
-            {
-                "model": MODEL,
-                "messages": self.messages,
-                "stream": False,
-                "keep_alive": "30m",
-                # el prompt ya le pide 1-2 oraciones porque la respuesta se
-                # lee en voz alta; se limita el generado a un puñado de
-                # tokens para que no tarde de mas generando de mas y luego
-                # se descarte al leerla.
-                "options": {"num_predict": 120},
-            }
-        ).encode("utf-8")
-        req = urllib.request.Request(
-            OLLAMA_CHAT_URL, data=payload, headers={"Content-Type": "application/json"}
-        )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.load(resp)
-            respuesta = data.get("message", {}).get("content", "").strip()
+            # el prompt ya le pide 1-2 oraciones porque la respuesta se lee
+            # en voz alta; el tope solo evita respuestas kilometricas (si se
+            # corta a mitad de frase, llm.chat recorta hasta la ultima completa).
+            msg = llm.chat(self.messages, max_tokens=120)
+            respuesta = llm.limit_sentences(msg.get("content") or "") or "No pude formular una respuesta, señor."
         except Exception:
             self.messages.pop()  # no se guarda el turno que fallo
-            return "No pude conectarme con mi modelo de IA local. Revisa que Ollama este corriendo."
+            return "No pude conectarme con mi modelo de IA local. Revisa que llama.cpp este corriendo."
 
         self.messages.append({"role": "assistant", "content": respuesta})
         self._trim_history()
@@ -91,24 +73,11 @@ def classify_yes_no(text: str):
         "¿Su respuesta significa que si quiere, o que no quiere? "
         "Respondé con una sola palabra, sin explicacion: si o no."
     )
-    payload = json.dumps(
-        {
-            "model": MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-            "keep_alive": "30m",
-            # se espera una sola palabra ("si"/"no"); capar el generado
-            # evita que el modelo se ponga a explicar antes de contestar.
-            "options": {"num_predict": 8},
-        }
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        OLLAMA_CHAT_URL, data=payload, headers={"Content-Type": "application/json"}
-    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.load(resp)
-        respuesta = data.get("message", {}).get("content", "").strip().lower()
+        # se espera una sola palabra ("si"/"no"); capar el generado evita
+        # que el modelo se ponga a explicar antes de contestar.
+        msg = llm.chat([{"role": "user", "content": prompt}], max_tokens=8, timeout=15)
+        respuesta = (msg.get("content") or "").strip().lower()
     except Exception:
         return None
 

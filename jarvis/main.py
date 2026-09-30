@@ -1,262 +1,472 @@
 import os
+import signal
 import sys
 import threading
+import time
 
-# la consola de Windows usa cp1252 por defecto, que no puede imprimir
-# muchos caracteres (emojis/simbolos en titulos de YouTube, respuestas de
-# la IA, etc.) y eso hacia crashear todo el programa en un print() suelto;
-# se fuerza utf-8 con reemplazo silencioso de lo que no se pueda mostrar.
+# la terminal puede no ser utf-8 (simbolos/emojis en titulos de YouTube,
+# respuestas de la IA, etc. hacian crashear un print() suelto); se fuerza
+# utf-8 con reemplazo silencioso de lo que no se pueda mostrar.
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-import webview
+import logging
 
-from jarvis import agent, brain
+from jarvis import agent, audio_focus, brain, demo, interrupt, llm, system, voice_config, voice_output, whatsapp
 from jarvis import server as jarvis_server
-from jarvis import whatsapp
 from jarvis.commands import handle_command
 from jarvis.hud import Hud
-from jarvis.listener import VoiceListener
 from jarvis.proactive import ProactiveSpeaker, greeting_for_time
-from jarvis import voice_output
+from jarvis.tui import JarvisApp
 from jarvis.voice_output import hablar, iniciar
-from jarvis.wakeword import extract_command
+from jarvis.wakeword import extract_command, find_command
+
+HELP = """Uso: jarvis [opciones]
+
+  --push-to-talk   sin wake word: Enter con la linea vacia para hablar
+  --no-mic         solo texto (no carga Whisper ni abre el microfono)
+  --mute           Jarvis no habla en voz alta (solo escribe)
+  -h, --help       esta ayuda
+"""
+
+# tras interrumpir a Jarvis, la frase que se estaba grabando empieza con el eco
+# de su voz: durante este rato se acepta la wake word en cualquier parte
+BARGE_GRACE_S = 12
 
 
-def run_wake_word_mode(listener: VoiceListener, hud: Hud):
-    def respond(msg: str):
-        print(msg)
-        hud.set_state("hablando")
-        hud.set_response(msg)
-        hablar(msg)
-        hud.set_state("inactivo")
+class Session:
+    """Controlador: une la interfaz (tui.py) con la escucha (listener.py), los
+    comandos (commands.py) y la voz (voice_output.py). Los metodos on_* los
+    llama la interfaz desde su hilo, asi que ninguno bloquea: el trabajo real
+    va en hilos aparte."""
 
-    def escuchar():
-        hud.set_state("escuchando")
-        respuesta = listener.listen_and_transcribe(on_partial=hud.set_heard)
-        print(f"Escuche: {respuesta}")
-        hud.set_heard(respuesta)
-        return respuesta
-
-    print("Jarvis escuchando en segundo plano. Di 'Jarvis, <comando>' (Ctrl+C para salir).")
-    # el saludo no debe bloquear el arranque de la escucha: respond() llama
-    # a hablar(), que espera a que XTTS termine de cargar (ver _run_jarvis
-    # en main.py) si todavia no esta listo. En un hilo aparte, el saludo se
-    # dice apenas XTTS este listo pero Jarvis ya queda escuchando la wake
-    # word de inmediato en vez de esperarlo tambien.
-    threading.Thread(target=respond, args=(greeting_for_time(),), daemon=True).start()
-    listener.flush_pending_audio()
-
-    proactive = ProactiveSpeaker(respond, listener.flush_pending_audio, hud=hud)
-    proactive.start()
-
-    try:
-        for text in listener.listen_forever(on_partial=hud.set_heard):
-            command = extract_command(text)
-            if command is None:
-                continue  # no empezo con la wake word, se ignora
-
-            proactive.notify_activity()
-            print(f"Escuche: {text}")
-            hud.set_heard(text)
-            if not command:
-                respond("Dígame, señor, ¿en qué puedo ayudarle?")
-                listener.flush_pending_audio()
-                continue
-
-            hud.set_state("pensando")
-            keep_going = handle_command(command, respond=respond, escuchar=escuchar, hud=hud)
-            hud.set_state("inactivo")
-            listener.flush_pending_audio()  # evita que se escuche a si mismo
-            if not keep_going:
-                break
-    except KeyboardInterrupt:
-        print("\nCerrando Jarvis.")
-    finally:
-        proactive.stop()
-
-
-def run_push_to_talk_mode(listener: VoiceListener, hud: Hud):
-    def respond(msg: str):
-        print(msg)
-        hud.set_state("hablando")
-        hud.set_response(msg)
-        hablar(msg)
-        hud.set_state("inactivo")
-
-    def escuchar():
-        hud.set_state("escuchando")
-        respuesta = listener.listen_and_transcribe(on_partial=hud.set_heard)
-        print(f"Escuche: {respuesta}")
-        hud.set_heard(respuesta)
-        return respuesta
-
-    print("Jarvis listo (modo push-to-talk).")
-    hud.set_state("inactivo")
-    while True:
-        key = input("\n[Enter] para hablar (o 'q' para salir): ")
-        if key.strip().lower() == "q":
-            print("Cerrando Jarvis.")
-            break
-        text = escuchar()
-        hud.set_state("pensando")
-        keep_going = handle_command(text, respond=respond, escuchar=escuchar, hud=hud)
-        hud.set_state("inactivo")
-        if not keep_going:
-            break
-
-
-def _shutdown(hud: Hud):
-    """Se llama al despedirse de Jarvis (palabra de salida) o si el
-    programa se corta por cualquier otro motivo (Ctrl+C, error): cierra
-    todo lo que Jarvis pudo haber dejado corriendo en segundo plano (el
-    Brave de WhatsApp Web) y la ventana del HUD, para que no quede nada
-    huerfano despues de decir 'adios'."""
-    print("Cerrando procesos de Jarvis...")
-    whatsapp.close()
-    voice_output.shutdown()
-    if hud.window is not None:
-        try:
-            hud.window.destroy()
-        except Exception:
-            pass
-
-
-def _run_jarvis(hud: Hud):
-    hud.set_state("cargando")
-    # El motor de voz activo (XTTS u OpenVoice, ver voice_config.py/el boton
-    # de configuracion) tarda de unos segundos a ~20s en cargar segun cual
-    # sea, contra ~1-2s de Whisper, y no hace falta tenerlo listo para poder
-    # ESCUCHAR: se carga en un hilo aparte para que la escucha de la wake
-    # word (y el servidor del celular) arranquen apenas Whisper esta listo,
-    # sin esperar tambien a la voz. Se dispara ANTES de construir
-    # VoiceListener() (no despues) para que las dos cargas pesadas se
-    # solapen en paralelo en vez de sumarse una atras de la otra - ahorra
-    # varios segundos del arranque total. hablar() ya espera a iniciar()
-    # (que es idempotente, ver voice_output.py) si la primera respuesta
-    # llega antes de que termine de cargar esa unica vez. El motor que NO
-    # esta activo no se toca aca (se carga recien si se cambia de voz).
-    print("Inicializando motor de voz en segundo plano...")
-    threading.Thread(target=iniciar, daemon=True).start()
-    listener = VoiceListener()
-    hud.set_state("inactivo")
-    try:
-        if "--push-to-talk" in sys.argv:
-            run_push_to_talk_mode(listener, hud)
-        else:
-            run_wake_word_mode(listener, hud)
-    finally:
-        _shutdown(hud)
-
-
-class Api:
-    """Metodos expuestos al HUD (jarvis/ui-src/src/App.jsx, compilado a ui/) via
-    window.pywebview.api.*, ya que al ser una ventana frameless no hay
-    controles nativos de Windows (minimizar/cerrar) ni forma de escribirle
-    a Jarvis salvo por este puente."""
-
-    def __init__(self, hud: Hud):
+    def __init__(self, hud: Hud, push_to_talk: bool, use_mic: bool, muted: bool):
         self.hud = hud
-        self._maximized = False
+        self.push_to_talk = push_to_talk
+        self.use_mic = use_mic
+        self.muted = muted
+        self.listener = None
+        self.app = None
+        self.proactive = None
+        # un solo comando a la vez: la voz, lo escrito y los avisos
+        # proactivos comparten el mismo altavoz y el mismo historial de charla
+        self._cmd_lock = threading.Lock()
+        self._closed = False
+        self._close_lock = threading.Lock()
+        self._demo_running = False
+        self._busy = False  # hay un comando en curso
+        # "callate" a mitad de un comando: el resto de lo que iba a decir se
+        # muestra en pantalla pero ya no se habla
+        self._interrupted = threading.Event()
+        self._barge_at = 0.0  # cuando se interrumpio a Jarvis por ultima vez
+        self._utt_ducked = False  # la frase en curso ya atenuo la musica (se oyo "Jarvis")
 
-    def minimize(self):
-        if self.hud.window is not None:
-            try:
-                self.hud.window.minimize()
-            except Exception:
-                pass
-
-    def toggle_maximize(self):
-        if self.hud.window is None:
+    # ---- salida / entrada ------------------------------------------------
+    def respond(self, msg: str):
+        self.hud.set_response(msg)
+        if self.muted or self._interrupted.is_set():
             return
-        try:
-            if self._maximized:
-                self.hud.window.restore()
-            else:
-                self.hud.window.maximize()
-            self._maximized = not self._maximized
-        except Exception:
-            pass
-
-    def close(self):
-        # Mismo camino que al despedirse por voz: mata el Brave/chromedriver
-        # de WhatsApp y destruye la ventana antes de terminar el proceso,
-        # para que el boton de cerrar no deje nada de Jarvis corriendo en
-        # segundo plano.
-        _shutdown(self.hud)
-        os._exit(0)
-
-    def send_text(self, text: str):
-        """Comando escrito desde el campo de texto del HUD: se procesa con
-        la misma logica que un comando dicho por voz (handle_command), y
-        Jarvis responde hablando por los parlantes de la PC igual que
-        siempre. escuchar=None porque tipear no graba audio (los flujos que
-        piden dictado, como mandar un WhatsApp, ya avisan que no pueden
-        tomarlo en este modo en vez de romperse, ver commands.py)."""
-        text = (text or "").strip()
-        if not text:
-            return
-
-        def respond(msg: str):
-            print(msg)
+        with audio_focus.ducked():  # la musica baja mientras Jarvis habla
             self.hud.set_state("hablando")
-            self.hud.set_response(msg)
             hablar(msg)
-            self.hud.set_state("inactivo")
+            self.hud.set_state("pensando" if self._busy else "inactivo")
 
-        self.hud.set_heard(text)
+    def escuchar(self) -> str:
+        self.hud.set_state("escuchando")
+        respuesta = self.listener.listen_and_transcribe(on_partial=self.hud.set_heard)
+        self.hud.set_heard(respuesta, final=True)
+        return respuesta
+
+    def _flush(self):
+        if self.listener is not None:
+            self.listener.flush_pending_audio()  # evita que se escuche a si mismo
+
+    def _run_command(self, text: str, escuchar) -> bool:
+        """Devuelve False si el usuario pidio salir."""
+        self._busy = True
+        self._interrupted.clear()
         self.hud.set_state("pensando")
-        keep_going = handle_command(text, respond=respond, escuchar=None, hud=self.hud)
-        self.hud.set_state("inactivo")
-        if not keep_going:
-            self.close()
+        try:
+            keep_going = handle_command(text, respond=self.respond, escuchar=escuchar, hud=self.hud)
+        except Exception as exc:
+            # un comando que falla no debe cortar la escucha
+            self.hud.log(f"El comando falló: {exc}", "bold red")
+            keep_going = True
+        finally:
+            self._busy = False
+            self._interrupted.clear()
+            self.hud.set_state("inactivo")
+        if not self._barge_at:
+            self._flush()  # (tras una interrupcion no: el usuario esta hablando)
+        return keep_going
 
-    def get_voice_status(self):
-        """Motor de voz activo/configurado ahora mismo, para el panel de
-        configuracion del HUD (ver App.jsx). pywebview serializa el dict
-        devuelto y lo entrega como resultado de la Promise de JS."""
-        return voice_output.status()
+    # ---- callar / pausar -------------------------------------------------
+    def _stop(self, command: str = "") -> bool:
+        """"Jarvis, callate / pausa / silencio". Si Jarvis esta hablando, se
+        calla (y si la orden nombra la musica, tambien la pausa); si no, pausa
+        lo que este sonando. Devuelve True si hizo algo."""
+        did = False
+        if voice_output.stop():
+            did = True
+            if self._busy:
+                self._interrupted.set()
+            self.hud.flash("interrumpido")
+            self.hud.log("⏹ Interrumpido")
+            if not interrupt.names_media(command):
+                return True
+        if system.pause_all():
+            self.hud.set_response("⏸ En pausa. Diga «Jarvis, continúa» para seguir.")
+            self.hud.flash("pausa")
+            return True
+        if not did:
+            self.hud.set_response("No hay nada sonando.")
+        return did
 
-    def set_voice_engine(self, engine: str):
-        """Cambia el motor de voz (panel de configuracion del HUD). No
-        bloquea: dispara la carga en un hilo de fondo, el HUD sondea
-        get_voice_status() para la barra de progreso."""
-        if engine not in ("xtts", "openvoice"):
+    def _on_barge_in(self, heard: str) -> bool:
+        """Lo que se oyo mientras Jarvis hablaba (ventana de listener.py, o una
+        frase que termino con Jarvis hablando). Corta si hay una palabra de
+        corte ("callate", "silencio"...) o la wake word, sin confundir el eco
+        de lo que el mismo esta diciendo. True si corto."""
+        said = voice_output.speaking_text()
+        if not said:
+            return False
+        word = interrupt.barge_in_word(heard, said)
+        wake = find_command(heard) is not None and "jarvis" not in interrupt.normalize(said)
+        if not (word or wake):
+            return False
+        self._barge_at = time.monotonic()
+        if wake and not self._utt_ducked:
+            self._utt_ducked = True  # se le esta hablando: que la musica siga baja
+            audio_focus.duck()
+        command = find_command(heard) if wake else word
+        self._stop(command or "")
+        if wake and not (command and interrupt.is_stop_command(command)):
+            self.hud.set_state("escuchando")
+        return True
+
+    # ---- arranque --------------------------------------------------------
+    def on_ready(self):
+        self._show_voice()
+        audio_focus.start()  # vigilante: que la musica nunca quede atenuada
+        threading.Thread(target=self._boot, daemon=True).start()
+
+    def _boot(self):
+        hud = self.hud
+        hud.set_state("cargando")
+        # el motor de voz y el LLM tardan segundos en cargar y no hacen falta
+        # para ESCUCHAR: se cargan en paralelo, en hilos aparte, y hablar()/
+        # llm.chat() esperan si la primera respuesta llega antes de tiempo.
+        threading.Thread(target=iniciar, daemon=True).start()
+        threading.Thread(target=self._warm_llm, daemon=True).start()
+
+        if self.use_mic:
+            try:
+                from jarvis.listener import VoiceListener
+
+                self.listener = VoiceListener()
+                problem = system.mic_problem()
+                if problem:
+                    hud.log("⚠ " + problem, "bold yellow")
+            except Exception as exc:
+                hud.log(f"No pude abrir la escucha ({exc}). Sigo en modo texto.", "bold red")
+                self.listener = None
+
+        self.proactive = ProactiveSpeaker(
+            self.respond, self._flush, hud=hud
+        )
+        self.proactive.start()
+        hud.set_state("inactivo")
+        threading.Thread(target=self.respond, args=(greeting_for_time(),), daemon=True).start()
+        self._flush()
+
+        if self.listener is None:
+            hud.log("Escribe un comando y pulsa Enter.")
+        elif self.push_to_talk:
+            hud.log("Modo push-to-talk: Enter con la línea vacía para hablar.")
+        else:
+            hud.log("Escuchando. Di 'Jarvis, <comando>'.")
+            self._wake_loop()
+
+    def _warm_llm(self):
+        try:
+            llm.ensure_ready()
+        except Exception as exc:
+            self.hud.log(f"Modelo de IA no disponible: {exc}", "bold red")
+
+    def _wake_loop(self):
+        """Solo reparte: cada comando corre en su hilo, asi el microfono sigue
+        escuchando mientras Jarvis trabaja o habla (para poder interrumpirlo)."""
+        self.listener.barge_in_active = voice_output.is_speaking
+        self.listener.on_barge_in = self._on_barge_in
+        try:
+            for text in self.listener.listen_forever(on_partial=self._on_partial, yield_empty=True):
+                self._on_utterance(text)
+        except Exception as exc:
+            self.hud.log(f"Se cortó la escucha: {exc}", "bold red")
+
+    def _on_partial(self, text: str):
+        """Transcripcion parcial (cada ~1 s mientras se habla). En cuanto se
+        oye "Jarvis", la musica baja, como con Alexa: el resto de la orden se
+        entiende mejor y el usuario sabe que lo escucho."""
+        if voice_output.is_speaking():
+            return  # es el eco de Jarvis; el corte lo mira _on_barge_in
+        self.hud.set_heard(text)
+        if not self._utt_ducked and extract_command(text) is not None:
+            self._utt_ducked = True
+            audio_focus.duck()
+            if not self._busy:
+                self.hud.set_state("escuchando")
+
+    def _on_utterance(self, text: str):
+        if not text:
+            # frase descartada (ruido, eco, Whisper no entendio): si una parcial
+            # con "Jarvis" habia bajado la musica, se suelta
+            if self._utt_ducked:
+                self._utt_ducked = False
+                audio_focus.release()
+                if not self._busy:
+                    self.hud.set_state("inactivo")
             return
-        voice_output.switch_engine(engine)
+        # (primero el corte: _on_barge_in puede atenuar la musica para esta frase)
+        echo = voice_output.is_speaking() and not self._on_barge_in(text)
+        ducked, self._utt_ducked = self._utt_ducked, False
+        release = audio_focus.release if ducked else (lambda: None)
+        if echo:
+            release()  # su propio eco
+            return
+        # la interrupcion (si hubo) pertenece a ESTA frase: se consume aca
+        barged = time.monotonic() - self._barge_at < BARGE_GRACE_S
+        self._barge_at = 0.0
+        command = extract_command(text)
+        if command is None and barged:
+            command = find_command(text)
+        if command is None:
+            release()  # no era para Jarvis
+            if ducked and not self._busy:
+                self.hud.set_state("inactivo")
+            return
 
-    def lobotomizar(self):
+        self.proactive.notify_activity()
+        self.hud.set_heard(text, final=True)
+        if interrupt.is_stop_command(command):
+            release()
+            if not barged:  # si no, ya se corto con la ventana de listener.py
+                self._stop(command)
+            if not self._busy:
+                self.hud.set_state("inactivo")
+            return
+        if not ducked:
+            audio_focus.duck()
+        threading.Thread(target=self._voice_command, args=(command,), daemon=True).start()
+
+    def _voice_command(self, command: str):
+        """Corre una orden dicha. Suelta el duck() que tomo _on_utterance."""
+        try:
+            with self._cmd_lock:
+                if not command:
+                    # solo "Jarvis": como Alexa, espera la orden sin repetir la wake word
+                    self.respond("¿Sí, señor?")
+                    command = self.escuchar().strip()
+                    if not command or interrupt.is_stop_command(command):
+                        self.hud.set_state("inactivo")
+                        return
+                if not self._run_command(command, self.escuchar):
+                    self.quit()
+        finally:
+            audio_focus.release()
+
+    # ---- eventos de la interfaz -----------------------------------------
+    def on_text(self, text: str):
+        if interrupt.is_stop_command(text) and voice_output.is_speaking():
+            self.hud.set_heard(text, final=True)
+            self._stop(text)
+            return
+        threading.Thread(target=self._typed, args=(text,), daemon=True).start()
+
+    def _typed(self, text: str):
+        """Comando escrito: mismo camino que uno dicho por voz. escuchar=None
+        porque tipear no graba audio (los flujos que piden dictado, como
+        mandar un WhatsApp, avisan que no pueden en este modo, ver
+        commands.py)."""
+        with self._cmd_lock:
+            self.hud.set_heard(text, final=True)
+            if self.proactive is not None:
+                self.proactive.notify_activity()
+            if not self._run_command(text, None):
+                self.quit()
+
+    def on_talk(self):
+        """Enter con la linea vacia (modo push-to-talk). Si Jarvis esta
+        hablando, primero lo calla."""
+        if voice_output.is_speaking():
+            self._stop()
+        if self.push_to_talk and self.listener is not None:
+            threading.Thread(target=self._talk, daemon=True).start()
+
+    def _talk(self):
+        if not self._cmd_lock.acquire(timeout=1.5):
+            return  # ya hay algo en curso
+        try:
+            with audio_focus.ducked():
+                text = self.escuchar()
+                if interrupt.is_stop_command(text):
+                    self._stop(text)
+                elif not self._run_command(text, self.escuchar):
+                    self.quit()
+        finally:
+            self._cmd_lock.release()
+
+    def on_shut_up(self):
+        """Tecla Esc: callar a Jarvis."""
+        if voice_output.is_speaking():
+            self._stop()
+
+    def on_demo(self):
+        """Boton/F5: arranca la demo en vivo; si ya esta corriendo, la detiene
+        (entre un paso y el siguiente)."""
+        if self._demo_running:
+            demo.stop_event.set()
+            self.hud.log("Deteniendo la demo...")
+            return
+        threading.Thread(target=self._demo, daemon=True).start()
+
+    def _demo(self):
+        with self._cmd_lock:
+            self._demo_running = True
+            self.hud.set_demo(True)
+            self.hud.set_state("pensando")
+            try:
+                demo.run_demo(self.respond, hud=self.hud)
+            except Exception as exc:
+                self.hud.log(f"La demo falló: {exc}", "bold red")
+            finally:
+                self._demo_running = False
+                self.hud.set_demo(False)
+                self.hud.set_state("inactivo")
+                self._flush()
+
+    def on_toggle_mute(self):
+        self.muted = not self.muted
+        self._show_voice()
+
+    def on_cycle_voice(self):
+        engines = voice_config.available_engines()
+        if len(engines) < 2:
+            self.hud.log("No hay otro motor de voz instalado.")
+            return
+        current = voice_config.get_engine()
+        nxt = engines[(engines.index(current) + 1) % len(engines)] if current in engines else engines[0]
+        voice_output.switch_engine(nxt)
+        self._show_voice()
+        self.hud.log(f"Cambiando la voz a '{nxt}'...")
+        threading.Thread(target=self._report_voice_switch, args=(nxt,), daemon=True).start()
+
+    def _report_voice_switch(self, engine: str):
+        while True:
+            time.sleep(1)
+            st = voice_output.status()
+            if st["loading"]:
+                continue
+            if st["error"]:
+                self.hud.log(f"La voz '{engine}' no cargó: {st['error']}", "bold red")
+            else:
+                self.hud.log(f"Voz '{engine}' lista.")
+            return
+
+    def on_reset(self):
         """Reinicia la conversacion de corto plazo (brain.py y agent.py) sin
-        cerrar Jarvis: para poder cambiar de tema de golpe sin que arrastre
-        contexto de lo que se hablo antes ('que no se le vaya el rollo').
-        No borra la memoria de largo plazo (jarvis/memory.py): eso es
-        informacion persistente del usuario, no contexto de la charla
-        actual, y no tiene sentido perderla solo por cambiar de tema."""
+        cerrar Jarvis, para cambiar de tema de golpe. No borra la memoria de
+        largo plazo (memory.py): eso es informacion persistente del usuario."""
         brain.reset()
         agent.reset()
-        msg = "Memoria reiniciada, señor. Empecemos de cero."
-        print(msg)
-        self.hud.set_state("hablando")
-        self.hud.set_response(msg)
-        hablar(msg)
-        self.hud.set_state("inactivo")
+        threading.Thread(
+            target=self.respond, args=("Memoria reiniciada, señor. Empecemos de cero.",), daemon=True
+        ).start()
+
+    def on_show_qr(self):
+        threading.Thread(target=self._qr, daemon=True).start()
+
+    def _qr(self):
+        try:
+            from jarvis.qr_share import mobile_qr_text
+
+            self.hud.show_qr(mobile_qr_text(), jarvis_server.TOKEN)
+        except Exception as exc:
+            self.hud.log(f"No pude generar el QR: {exc}", "bold red")
+
+    def _show_voice(self):
+        self.hud.set_voice(voice_config.get_engine(), self.muted)
+
+    # ---- cierre ----------------------------------------------------------
+    def on_quit(self):
+        self.shutdown()
+
+    def quit(self):
+        """Salida iniciada desde un hilo de fondo (palabra de despedida)."""
+        self.shutdown()
+        try:
+            self.app.call_from_thread(self.app.exit)
+        except Exception:
+            os._exit(0)
+
+    def shutdown(self):
+        """Cierra todo lo que Jarvis pudo haber dejado corriendo (el Brave de
+        WhatsApp Web, el servidor de OpenVoice, el llama-server propio) para
+        que no quede nada huerfano despues de decir 'adios' o Ctrl+Q."""
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        voice_output.stop()
+        audio_focus.restore_now()  # que la musica no quede atenuada
+        whatsapp.close()
+        voice_output.shutdown()
+        llm.shutdown()
 
 
 def main():
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print(HELP)
+        return
+
+    # el servidor del celular usa werkzeug, que loguea CADA request a
+    # stderr; en la TUI eso solo llenaria el historial de ruido
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
     hud = Hud()
-    api = Api(hud)
-    hud.create_window(js_api=api)
+    session = Session(
+        hud,
+        push_to_talk="--push-to-talk" in sys.argv,
+        use_mic="--no-mic" not in sys.argv,
+        muted="--mute" in sys.argv,
+    )
+    app = JarvisApp(session, push_to_talk=session.push_to_talk)
+    session.app = app
+    hud.attach(app)
+
     # servidor HTTP para controlar Jarvis desde el celular (misma red wifi):
-    # no depende de XTTS/Whisper, solo de la logica de commands.py, asi que
-    # se puede levantar en un hilo aparte sin retrasar el arranque del HUD.
-    # daemon=True para que no impida cerrar el proceso al salir.
+    # solo depende de commands.py, asi que arranca en un hilo aparte sin
+    # esperar a Whisper ni a la voz. daemon=True para no impedir cerrar.
     threading.Thread(target=jarvis_server.run_server, daemon=True).start()
-    webview.start(_run_jarvis, (hud,))
-    # _shutdown() ya cerro WhatsApp y la ventana del HUD para cuando
-    # webview.start() regresa aqui; se fuerza el cierre del proceso por si
-    # queda algun hilo o handle de WebView2 vivo, para que "adios" de
-    # verdad cierre todo (no solo deje de escuchar).
-    os._exit(0)
+
+    def _terminated(signum, frame):
+        # cerrar la ventana de la terminal (SIGHUP) o un `kill` (SIGTERM) mataba
+        # Jarvis SIN correr shutdown(): el llama-server (4.6 GB de GPU), Brave y
+        # OpenVoice quedaban huerfanos
+        session.shutdown()
+        os._exit(0)
+
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, _terminated)
+
+    try:
+        app.run()
+    finally:
+        session.shutdown()
+        # se fuerza el cierre por si queda algun hilo vivo (Flask, Whisper,
+        # PortAudio): "adios" tiene que cerrar de verdad, no solo dejar de
+        # escuchar.
+        os._exit(0)
 
 
 if __name__ == "__main__":

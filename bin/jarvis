@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Lanza Jarvis en esta terminal:  jarvis  [--push-to-talk] [--no-mic] [--mute]
+SRC="${BASH_SOURCE[0]}"
+while [ -L "$SRC" ]; do  # resuelve el symlink de ~/.local/bin/jarvis
+  DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
+  SRC="$(readlink "$SRC")"
+  [[ "$SRC" != /* ]] && SRC="$DIR/$SRC"
+done
+ROOT="$(cd -P "$(dirname "$SRC")/.." && pwd)"
+cd "$ROOT" || exit 1
+
+PY="$ROOT/venv/bin/python"
+if [ ! -x "$PY" ]; then
+  echo "Falta el entorno virtual. Crealo con:" >&2
+  echo "  python3.12 -m venv venv && venv/bin/pip install -r requirements.txt" >&2
+  exit 1
+fi
+
+# librerias CUDA instaladas por pip (cublas 12, cudnn 9) para Whisper en GPU
+for d in "$ROOT"/venv/lib/python3.*/site-packages/nvidia/*/lib; do
+  [ -d "$d" ] && LD_LIBRARY_PATH="$d${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+done
+export LD_LIBRARY_PATH
+
+mkdir -p logs
+exec "$PY" -u -m jarvis.main "$@"

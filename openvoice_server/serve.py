@@ -12,7 +12,7 @@ quede cargada de entrada, para no gastar VRAM/tiempo si nunca se usa) y le
 habla por HTTP en localhost mientras dura la sesion.
 
 Correr a mano (para probar):
-    openvoice_server/OpenVoice/venv/Scripts/python.exe serve.py
+    openvoice_server/OpenVoice/venv/bin/python serve.py
 """
 
 import logging

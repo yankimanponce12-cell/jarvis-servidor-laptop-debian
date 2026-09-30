@@ -1,94 +1,82 @@
-import json
 import logging
 import threading
-from pathlib import Path
-
-import webview
 
 from jarvis import watch
 
-UI_DIR = Path(__file__).resolve().parent / "ui"
 logger = logging.getLogger("jarvis.hud")
 
 
 class Hud:
-    """Ventana HUD flotante (estilo JARVIS de Iron Man) que muestra el estado
-    actual de Jarvis (escuchando/pensando/hablando) y subtitulos con lo que se
-    dijo y lo que respondio. Corre sobre pywebview; si la ventana aun no esta
-    lista o pywebview falla, los métodos no lanzan excepcion (el asistente
-    debe poder seguir funcionando sin interfaz)."""
+    """Puente entre el resto de Jarvis (hilos de voz, comandos, servidor) y
+    la interfaz de terminal (jarvis/tui.py). Mantiene la misma API que tenia
+    el HUD de ventana (set_state/set_heard/set_response/set_weather/show_qr)
+    para que commands.py, agent.py y proactive.py no cambien.
+
+    Los widgets de Textual solo se pueden tocar desde el hilo de la app, asi
+    que cada llamada cruza de hilo con call_from_thread. Si la app todavia
+    no esta lista o ya cerro, no lanza excepcion (el asistente debe poder
+    seguir funcionando sin interfaz)."""
 
     def __init__(self):
-        self.window = None
+        self.app = None
 
-    def create_window(self, js_api=None):
-        # pywebview/WebView2 no soporta transparencia real hacia el escritorio
-        # en Windows (queda en blanco en vez de dejar ver lo de atras: issue
-        # r0x0r/pywebview#1611), asi que en vez de eso se usa un panel oscuro
-        # tipo "visor" que combina con el color de fondo del propio HTML.
-        #
-        # No se fija x/y a mano: webview.screens todavia no refleja el
-        # monitor real en este punto (el toolkit nativo no esta inicializado
-        # hasta webview.start()), lo que en pantallas con escalado de Windows
-        # hacia terminar la ventana fuera de la pantalla. easy_drag=True deja
-        # que el usuario la arrastre a la esquina que prefiera.
-        #
-        # js_api expone metodos de Python (minimizar/maximizar/cerrar) que
-        # los botones de la barra de titulo (ver ui-src/src/App.jsx) llaman via
-        # window.pywebview.api.*, ya que al ser frameless no hay barra nativa
-        # de Windows con esos controles.
-        #
-        # resizable=True (antes False) para que maximizar tenga sentido; el
-        # CSS (ver ui/style.css) usa unidades responsivas (clamp/vmin) para
-        # que el HUD se vea bien tanto en la ventana chica de siempre como
-        # maximizado a pantalla completa, no solo estirado con espacio vacio.
-        self.window = webview.create_window(
-            "Jarvis",
-            str(UI_DIR / "index.html"),
-            width=420,
-            height=400,
-            min_size=(380, 360),
-            frameless=True,
-            easy_drag=True,
-            on_top=True,
-            background_color="#05080a",
-            resizable=True,
-            js_api=js_api,
-        )
-        return self.window
+    def attach(self, app):
+        self.app = app
 
-    def _run_js(self, code: str):
-        if self.window is None:
+    def _ui(self, method: str, *args):
+        app = self.app
+        if app is None:
             return
         try:
-            self.window.evaluate_js(code)
+            app.call_from_thread(getattr(app, method), *args)
         except Exception as exc:
-            logger.error(f"No se pudo actualizar el HUD: {exc}")
+            logger.debug(f"No se pudo actualizar la interfaz ({method}): {exc}")
 
     def set_state(self, state: str):
         """state: 'cargando' | 'inactivo' | 'escuchando' | 'pensando' | 'hablando'"""
-        self._run_js(f"setState({json.dumps(state)})")
+        self._ui("ui_state", state)
         watch.send_state(state)
 
-    def set_heard(self, text: str):
-        self._run_js(f"setHeard({json.dumps(text)})")
+    def set_heard(self, text: str, final: bool = False):
+        """Subtitulo de lo escuchado. Sin final=True es una transcripcion
+        parcial (solo actualiza el panel); con final=True tambien queda en
+        el historial."""
+        self._ui("ui_heard", text, final)
+        if final and text:
+            self._ui("ui_log", f"tú › {text}")
+
+    def flash(self, kind: str):
+        """Destello breve del reactor: 'interrumpido' (se callo a Jarvis) o 'pausa'."""
+        self._ui("ui_flash", kind)
 
     def set_response(self, text: str):
-        self._run_js(f"setResponse({json.dumps(text)})")
+        self._ui("ui_reply", text)
+        self._ui("ui_log", f"Jarvis › {text}", "#22d3ee")
         watch.send_response(text)
 
-    def set_weather(self, temp: int, desc: str):
-        self._run_js(f"setWeather({json.dumps(temp)}, {json.dumps(desc)})")
+    def set_weather(self, temp: int, desc: str, code=None, is_day: bool = True, rain_prob=None, city: str = ""):
+        """Titulo y panel de clima. code (WMO), is_day, rain_prob (%) y city
+        eligen la escena animada; sin code solo se actualiza el titulo."""
+        self._ui("ui_weather", temp, desc, code, is_day, rain_prob, city)
 
-    def show_qr(self, data_uri: str, token: str = "", seconds: float = 40):
-        """Muestra el QR (data URI base64, ver qr_share.py) como overlay
-        sobre el HUD, junto con el PIN en texto grande (por si el usuario
-        prefiere tipearlo a mano en vez de escanear). Se oculta solo
-        despues de `seconds`, para que no se quede tapando el anillo/
-        subtitulos indefinidamente si el usuario se olvida de cerrarlo."""
-        self._run_js(f"showQr({json.dumps(data_uri)}, {json.dumps(token)})")
+    def set_voice(self, label: str, muted: bool):
+        self._ui("ui_voice", label, muted)
+
+    def set_demo(self, running: bool):
+        self._ui("ui_demo", running)
+
+    def log(self, text: str, style: str = "dim"):
+        self._ui("ui_log", text, style)
+
+    def show_qr(self, qr, token: str = "", seconds: float = 40):
+        """Muestra el QR (rich.Text, ver qr_share.py) con el PIN en grande por
+        si prefiere tipearlo a mano. Se cierra solo tras `seconds` (o con Esc)
+        para que no tape la pantalla si el usuario se olvida."""
+        self._ui("ui_show_qr", qr, token)
         if seconds:
-            threading.Timer(seconds, self.hide_qr).start()
+            timer = threading.Timer(seconds, self.hide_qr)
+            timer.daemon = True
+            timer.start()
 
     def hide_qr(self):
-        self._run_js("hideQr()")
+        self._ui("ui_hide_qr")

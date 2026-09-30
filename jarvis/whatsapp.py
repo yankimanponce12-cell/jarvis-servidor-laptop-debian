@@ -1,4 +1,6 @@
 import os
+import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -27,20 +29,25 @@ from webdriver_manager.core.os_manager import ChromeType
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROFILE_DIR = os.path.join(PROJECT_ROOT, "whatsapp_profile")
 
+_BRAVE_NAMES = ["brave-browser", "brave", "brave-browser-stable"]
 _BRAVE_PATHS = [
-    r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-    r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
-    os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+    "/usr/bin/brave-browser",
+    "/opt/brave.com/brave/brave-browser",
+    "/opt/brave.com/brave/brave",
 ]
 
 
 def _find_brave_binary() -> str:
+    for name in _BRAVE_NAMES:
+        found = shutil.which(name)
+        if found:
+            return found
     for path in _BRAVE_PATHS:
         if os.path.isfile(path):
             return path
     raise RuntimeError(
-        "No encontre el ejecutable de Brave. Revisa que este instalado en una "
-        "de estas rutas: " + ", ".join(_BRAVE_PATHS)
+        "No encontre el ejecutable de Brave. Instalalo (brave-browser) o "
+        "revisa que este en el PATH: " + ", ".join(_BRAVE_NAMES)
     )
 
 
@@ -78,7 +85,11 @@ def _launch_brave(port: int):
         "--no-first-run",
         "--no-default-browser-check",
     ]
-    process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # start_new_session: Brave queda en su propio grupo de procesos, para poder
+    # cerrarlo entero (con todos sus hijos) al despedirse, ver _kill_process_tree
+    process = subprocess.Popen(
+        args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
+    )
 
     end = time.time() + 30
     while time.time() < end:
@@ -241,14 +252,33 @@ def close():
 
 
 def _kill_process_tree(pid: int):
+    """Cierra el proceso. Si vive en su PROPIO grupo (Brave, lanzado con
+    start_new_session) se mata el grupo entero, por los muchos hijos de
+    Chromium. Si comparte grupo con Jarvis (chromedriver, lanzado por
+    Selenium), matar el grupo mataria a Jarvis tambien: ahi solo el PID."""
     try:
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return
+    try:
+        if pgid != os.getpgid(0):
+            os.killpg(pgid, signal.SIGTERM)
         else:
-            os.kill(pid, 9)
-    except Exception:
+            os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    # SIGTERM da chance de cerrar limpio (Brave guarda la sesion de WhatsApp);
+    # si a los 2s sigue vivo, se remata con SIGKILL
+    for _ in range(20):
+        time.sleep(0.1)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+    try:
+        if pgid != os.getpgid(0):
+            os.killpg(pgid, signal.SIGKILL)
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
         pass

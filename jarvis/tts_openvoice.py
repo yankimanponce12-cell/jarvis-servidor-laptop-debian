@@ -5,14 +5,15 @@ import time
 from pathlib import Path
 
 import requests
-import sounddevice as sd
 import soundfile as sf
+
+from . import playback
 
 logger = logging.getLogger("jarvis.voice")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OPENVOICE_DIR = PROJECT_ROOT / "openvoice_server"
-OPENVOICE_PYTHON = OPENVOICE_DIR / "OpenVoice" / "venv" / "Scripts" / "python.exe"
+OPENVOICE_PYTHON = OPENVOICE_DIR / "OpenVoice" / "venv" / "bin" / "python"
 OPENVOICE_SERVE_SCRIPT = OPENVOICE_DIR / "serve.py"
 OPENVOICE_PORT = 8766
 OPENVOICE_URL = f"http://127.0.0.1:{OPENVOICE_PORT}"
@@ -93,11 +94,12 @@ class OpenVoiceClient:
         r.raise_for_status()
         return r.content
 
-    def speak(self, text: str):
+    def speak(self, text: str, stop_event=None):
         audio_bytes = self.synthesize_wav_bytes(text)
+        if stop_event is not None and stop_event.is_set():
+            return
         data, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32")
-        sd.play(data, samplerate=sample_rate)
-        sd.wait()
+        playback.play(data, sample_rate, stop_event)
 
     def stop(self):
         if self._process is not None and self._process.poll() is None:

@@ -1,18 +1,26 @@
-import base64
-import io
-
 import qrcode
+from rich.text import Text
 
 from jarvis import server as jarvis_server
 
 
-def mobile_qr_data_uri() -> str:
-    """Genera el QR de la pagina movil de Jarvis como data URI base64, listo
-    para inyectar en un <img> del HUD (ver Hud.show_qr). El link ya incluye
-    el token de acceso, asi que escanearlo alcanza sin copiar nada a mano en
-    el telefono."""
-    img = qrcode.make(jarvis_server.mobile_url(), box_size=8, border=2)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
+def mobile_qr_text() -> Text:
+    """QR de la pagina movil de Jarvis dibujado con medios bloques (▀▄█),
+    dos filas de modulos por linea de terminal. Va en negro sobre fondo
+    blanco (no al reves): los lectores de QR de los celulares esperan
+    modulos oscuros sobre claro. El link ya incluye el token de acceso, asi
+    que escanearlo alcanza sin copiar nada a mano en el telefono."""
+    qr = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_L)
+    qr.add_data(jarvis_server.mobile_url())
+    qr.make(fit=True)
+    matrix = qr.get_matrix()
+    if len(matrix) % 2:
+        matrix.append([False] * len(matrix[0]))
+
+    lines = []
+    for top_row, bottom_row in zip(matrix[0::2], matrix[1::2]):
+        line = ""
+        for top, bottom in zip(top_row, bottom_row):
+            line += "█" if top and bottom else "▀" if top else "▄" if bottom else " "
+        lines.append(line)
+    return Text("\n".join(lines), style="black on white", no_wrap=True)

@@ -1,5 +1,6 @@
 {
   "default_city": "Ciudad de Mexico",
   "default_lat": 19.4326,
-  "default_lon": -99.1332
+  "default_lon": -99.1332,
+  "use_ip": false
 }
