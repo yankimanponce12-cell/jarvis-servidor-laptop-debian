@@ -23,6 +23,7 @@ resolviendo los casos exactos de siempre, instantaneo, sin pasar por aca.
 Solo lo que no matchea ninguna regla llega hasta el agente."""
 
 import datetime
+import inspect
 import json
 import re
 
@@ -30,15 +31,21 @@ from jarvis import actions, llm, memory, weather, whatsapp
 
 MAX_TURNS = 8  # conversacion de corto plazo (se resetea con lobotomizar); lo de largo plazo vive en memory.py
 
-# a proposito la misma redaccion corta que se valido en el benchmark: se
-# probo una version mas larga/explicativa y por si sola (sin tocar las
-# herramientas) ya bajaba la confiabilidad del tool-calling
+# Con Qwen3 1.7B los ejemplos de charla cambiaron mas el tono que cualquier
+# regla (antes: "Estoy funcionando normalmente. ¿En qué puedo ayudarte?"; con
+# ejemplos: "Todos mis sistemas en orden, señor.") sin bajar los aciertos de
+# herramientas (16/24 en ambos). Los ejemplos NO son de chistes: los copiaba
+# tal cual (los chistes salen de chistes.py).
 BASE_SYSTEM_PROMPT = (
-    "Tu nombre es Jarvis, un asistente de voz en español inspirado en el "
-    "JARVIS de Iron Man: formal, te diriges al usuario como 'señor'. "
-    "Cuando el usuario pide una accion concreta usa la herramienta "
-    "correspondiente. Si es charla general, respondes vos mismo en 1-2 "
-    "oraciones, sin markdown."
+    "Tu nombre es Jarvis, el asistente de voz inspirado en el JARVIS de Iron Man: formal, "
+    "ingenioso y con un toque de humor seco. Hablas de usted y le dices 'señor' al usuario. "
+    "Cuando pide una accion concreta usa la herramienta correspondiente. Si es charla, respondes "
+    "tu mismo en 1-2 oraciones, sin markdown, como en una platica normal: haces lo que te piden "
+    "y no terminas ofreciendo ayuda ni preguntando que mas necesita.\n"
+    "Ejemplos de charla:\n"
+    "Usuario: ¿cómo estás? -> Jarvis: Todos mis sistemas en orden, señor. Mejor que nunca.\n"
+    "Usuario: dime una curiosidad -> Jarvis: Los pulpos tienen tres corazones, señor. Ninguno dedicado al romance, me temo.\n"
+    "Usuario: estoy cansado -> Jarvis: Un día largo, entonces. Le sugiero una pausa, señor; el mundo puede esperar diez minutos."
 )
 
 # ---- largo de la respuesta ---------------------------------------------------
@@ -57,7 +64,8 @@ LONG_SYSTEM_PROMPT = (
     "o tres oraciones no muy largas (unas 40 a 60 palabras en total), con lo "
     "más interesante o útil y sin rodeos, y termina siempre la idea; nunca "
     "dejes una explicación a medias. Si pide varios puntos (por ejemplo tres "
-    "consejos), dilos todos brevemente (primero, segundo, tercero)."
+    "consejos), dilos todos brevemente (primero, segundo, tercero). No "
+    "termines ofreciendo más ayuda."
 )
 # En esta CPU la IA escribe ~8 tokens/s: 90 palabras eran 20-28 s de espera.
 # Con ~60 palabras son ~10 s; si igual se pasa, llm.chat recorta a la ultima frase completa
@@ -162,23 +170,52 @@ def warm():
     llm.chat([{"role": "system", "content": _system(LONG_SYSTEM_PROMPT)}, hola], max_tokens=1, slot=llm.SLOT_LONG)
 
 
-def _chat(messages, tools=None):
-    msg = llm.chat(
-        [{"role": "system", "content": _system(BASE_SYSTEM_PROMPT)}] + messages,
-        tools=tools,
-        # 1-2 oraciones: ~90 tokens sobran; con 160 Qwen3 se extendia y tardaba ~20 s
-        max_tokens=90,
-        slot=llm.SLOT_AGENT,
-    )
+class _Emitter:
+    """Dice cada frase apenas la IA la termina (ver llm.chat_stream): la
+    primera con respond(frase) y las siguientes con respond(frase, append=True).
+    Solo existe si respond() acepta append (la interfaz de main.py); el
+    servidor del celular y las pruebas siguen recibiendo la respuesta entera."""
+
+    def __init__(self, respond):
+        self._respond = respond
+        self.count = 0
+
+    @staticmethod
+    def for_(respond):
+        try:
+            ok = "append" in inspect.signature(respond).parameters
+        except (TypeError, ValueError):
+            ok = False
+        return _Emitter(respond) if ok else None
+
+    def __call__(self, sentence: str):
+        self._respond(sentence, append=self.count > 0)
+        self.count += 1
+
+
+def _chat(messages, tools=None, emit=None):
+    full = [{"role": "system", "content": _system(BASE_SYSTEM_PROMPT)}] + messages
+    # 1-2 oraciones: ~90 tokens sobran; con 160 Qwen3 se extendia y tardaba ~20 s
+    if emit is not None:
+        msg = llm.chat_stream(full, on_sentence=emit, tools=tools, max_tokens=90, slot=llm.SLOT_AGENT)
+        if msg.get("content") or msg.get("tool_calls"):
+            return msg
+        # no salio nada limpio (p.ej. se fue al chino): chat() reintenta esos casos
+    msg = llm.chat(full, tools=tools, max_tokens=90, slot=llm.SLOT_AGENT)
     if msg.get("content") and not msg.get("tool_calls"):
         msg["content"] = llm.limit_sentences(msg["content"])  # red de seguridad: hasta 3 frases completas
     return msg
 
 
-def _converse(history: list) -> str:
+def _converse(history: list, emit=None) -> str:
     """Respuesta de un parrafo completo (sin herramientas) para lo que pide explicacion."""
-    msg = llm.chat([{"role": "system", "content": _system(LONG_SYSTEM_PROMPT)}] + history, max_tokens=LONG_MAX_TOKENS,
-                   slot=llm.SLOT_LONG)
+    full = [{"role": "system", "content": _system(LONG_SYSTEM_PROMPT)}] + history
+    if emit is not None:
+        msg = llm.chat_stream(full, on_sentence=emit, max_tokens=LONG_MAX_TOKENS,
+                              max_sentences=LONG_MAX_SENTENCES, slot=llm.SLOT_LONG)
+        if msg.get("content"):
+            return msg["content"]
+    msg = llm.chat(full, max_tokens=LONG_MAX_TOKENS, slot=llm.SLOT_LONG)
     return llm.limit_sentences(msg.get("content") or "", n=LONG_MAX_SENTENCES)
 
 
@@ -289,19 +326,21 @@ class Agent:
         Si algo falla (llama.cpp caido, respuesta rara), no lanza excepcion:
         cae a una respuesta generica, igual que hacia brain.ask()."""
         self.messages.append({"role": "user", "content": text})
+        emit = _Emitter.for_(respond)
         if wants_long_answer(text):
             try:
-                texto = _converse(self._plain_history())
+                texto = _converse(self._plain_history(), emit)
             except Exception:
                 self.messages.pop()
                 respond(_sir("No pude conectarme con mi modelo de IA local. Revise que llama.cpp esté corriendo"))
                 return
-            respond(texto or _sir("No entendí bien, intente de nuevo"))
+            if not (emit and emit.count):
+                respond(texto or _sir("No entendí bien, intente de nuevo"))
             self.messages.append({"role": "assistant", "content": texto})
             self._trim_history()
             return
         try:
-            msg = _chat(self.messages, tools=TOOLS)
+            msg = _chat(self.messages, tools=TOOLS, emit=emit)
         except Exception:
             self.messages.pop()
             respond(_sir("No pude conectarme con mi modelo de IA local. Revise que llama.cpp esté corriendo"))
@@ -310,7 +349,8 @@ class Agent:
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
             texto = (msg.get("content") or "").strip()
-            respond(texto or _sir("No entendí bien, intente de nuevo"))
+            if not (emit and emit.count):
+                respond(texto or _sir("No entendí bien, intente de nuevo"))
             self.messages.append({"role": "assistant", "content": texto})
             self._trim_history()
             return

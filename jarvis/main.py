@@ -62,8 +62,13 @@ class Session:
         self._utt_ducked = False  # la frase en curso ya atenuo la musica (se oyo "Jarvis")
 
     # ---- salida / entrada ------------------------------------------------
-    def respond(self, msg: str):
-        self.hud.set_response(msg)
+    def respond(self, msg: str, append: bool = False):
+        """Muestra y dice msg. append=True: es la siguiente frase de la misma
+        respuesta (la IA la acaba de escribir), se agrega a lo que ya se ve."""
+        if append:
+            self.hud.append_response(msg)
+        else:
+            self.hud.set_response(msg)
         if self.muted or self._interrupted.is_set():
             return
         with audio_focus.ducked():  # la musica baja mientras Jarvis habla

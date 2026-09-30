@@ -2,11 +2,16 @@
 una API compatible con OpenAI (/v1/chat/completions) con tool-calling gracias
 a --jinja. Brain y agente usan el MISMO modelo/servidor (uno solo en memoria).
 
-Corre en la CPU (esta laptop no tiene GPU NVIDIA): modelo chico (Qwen3 1.7B)
-y los nucleos fisicos. El servidor se arranca solo, bajo demanda, si no
+Corre en la grafica integrada (Radeon Vega 3) con Vulkan: leyendo el prompt
+es ~4 veces mas rapida que la CPU (76 contra 20 tokens/s con llama-bench) y
+escribiendo casi igual (9.5 contra 10.6), y ademas deja la CPU libre para
+Whisper y la voz. Si Vulkan falla, cae solo a la version de CPU. Modelo chico
+(Qwen3 1.7B). El servidor se arranca solo, bajo demanda, si no
 hay uno escuchando ya; se puede sobreescribir todo con variables de entorno:
 
-  JARVIS_LLAMA_SERVER  ruta al binario llama-server
+  JARVIS_LLAMA_SERVER  ruta al binario llama-server (version CPU, de respaldo)
+  JARVIS_LLAMA_SERVER_GPU  ruta al llama-server compilado con Vulkan
+  JARVIS_LLM_GPU       0 = no usar la grafica
   JARVIS_MODEL         ruta al .gguf
   JARVIS_LLM_URL       si ya tenes un servidor corriendo (no se arranca otro)
   JARVIS_LLM_CTX       tamaño de contexto total (por defecto 6144, 2048 por slot)
@@ -31,6 +36,10 @@ LOG_DIR = PROJECT_ROOT / "logs"
 LLAMA_SERVER = Path(
     os.environ.get("JARVIS_LLAMA_SERVER", Path.home() / "llama.cpp" / "llama-b11279" / "llama-server")
 )
+LLAMA_SERVER_GPU = Path(
+    os.environ.get("JARVIS_LLAMA_SERVER_GPU", Path.home() / "llama.cpp" / "llama-b11279-vulkan" / "llama-server")
+)
+USE_GPU = os.environ.get("JARVIS_LLM_GPU", "1") != "0"
 MODEL_PATH = Path(
     # comparado en esta CPU contra Qwen2.5 1.5B y 3B (34 pedidos al agente):
     # mismos aciertos de herramientas que el 1.5B (22/34; el 3B saca 24 pero
@@ -48,7 +57,8 @@ CONTEXT = os.environ.get("JARVIS_LLM_CTX", "6144")
 # en el slot del agente y lo desalojaba (otra vez ~35 s procesando herramientas).
 SLOT_AGENT, SLOT_LONG, SLOT_CHAT = 0, 1, 2
 # 2 = los nucleos fisicos del Ryzen 3 2200U: con 4 hilos no va mas rapido (medido
-# con llama-bench) y deja sin CPU a Whisper y a la interfaz
+# con llama-bench) y deja sin CPU a Whisper y a la interfaz. Con la grafica casi
+# no se usan (solo para lo que no va a la GPU).
 THREADS = os.environ.get("JARVIS_LLM_THREADS", "2")
 # 8081 y no 8080: el servidor.sh de ~/llama.cpp ya usa 8080 para su chat web
 PORT = 8081
@@ -56,6 +66,7 @@ BASE_URL = os.environ.get("JARVIS_LLM_URL", f"http://127.0.0.1:{PORT}").rstrip("
 _MANAGED = "JARVIS_LLM_URL" not in os.environ
 
 _process: subprocess.Popen | None = None
+_on_gpu = False
 _lock = threading.Lock()
 
 
@@ -71,28 +82,31 @@ def _healthy() -> bool:
         return False
 
 
-def _start_server():
-    global _process
-    if not LLAMA_SERVER.is_file():
-        raise LLMUnavailable(f"No encontre llama-server en {LLAMA_SERVER}")
+def _start_server(gpu: bool):
+    global _process, _on_gpu
+    binary = LLAMA_SERVER_GPU if gpu else LLAMA_SERVER
+    if not binary.is_file():
+        raise LLMUnavailable(f"No encontre llama-server en {binary}")
     if not MODEL_PATH.is_file():
         raise LLMUnavailable(f"No encontre el modelo {MODEL_PATH}")
     LOG_DIR.mkdir(exist_ok=True)
     log = open(LOG_DIR / "llama-server.log", "ab")
-    logger.info("Arrancando llama-server con %s", MODEL_PATH.name)
+    logger.info("Arrancando llama-server (%s) con %s", "Vulkan" if gpu else "CPU", MODEL_PATH.name)
+    _on_gpu = gpu
     _process = subprocess.Popen(
         [
-            str(LLAMA_SERVER),
+            str(binary),
             "-m", str(MODEL_PATH),
             "--jinja",
-            "-ngl", "0",  # todo en CPU
+            "-ngl", "99" if gpu else "0",  # todas las capas a la grafica, o ninguna
+            "-ub", "256",  # medido: el lote de 256 lee el prompt mas rapido que el de 512 en la Vega
             "-t", THREADS,
             "-c", CONTEXT,
             "--parallel", "3",
             "--host", "127.0.0.1",
             "--port", str(PORT),
         ],
-        cwd=str(LLAMA_SERVER.parent),
+        cwd=str(binary.parent),
         stdin=subprocess.DEVNULL,
         stdout=log,
         stderr=log,
@@ -109,10 +123,14 @@ def ensure_ready(timeout: float = 240.0):
         raise LLMUnavailable(f"No responde el servidor LLM en {BASE_URL}")
     with _lock:
         if _process is None or _process.poll() is not None:
-            _start_server()
+            _start_server(USE_GPU and LLAMA_SERVER_GPU.is_file())
         deadline = time.time() + timeout
         while time.time() < deadline:
             if _process.poll() is not None:
+                if _on_gpu:
+                    logger.warning("llama-server con Vulkan se cerro (codigo %s); sigo en CPU", _process.returncode)
+                    _start_server(False)
+                    continue
                 raise LLMUnavailable(
                     f"llama-server se cerro solo (codigo {_process.returncode}), ver logs/llama-server.log"
                 )
@@ -174,11 +192,45 @@ def _trim_to_sentence(text: str) -> str:
     return cut.rstrip(",;: ") + "…"
 
 
+# Muletillas de asistente con que los modelos chicos cierran TODO ("Estoy bien,
+# señor. ¿En qué puedo ayudarle?"): en una charla normal sobran, asi que se
+# quitan del FINAL de la respuesta (si no queda nada mas, se dejan).
+_FILLER = re.compile(
+    r"^[¡¿]?\s*(?:y\s+)?(?:"
+    r"(?:en\s+)?(?:que|como)\s+(?:mas\s+)?(?:le|te|lo|la)?\s*(?:puedo|podria)\s+(?:ayudar|servir|asistir)\w*"
+    r"|(?:le|te)\s+(?:puedo|podria)\s+ayudar\w*(?:\s+(?:con|en)\s+algo(?:\s+mas)?)?"
+    r"|(?:necesita|necesitas|desea|deseas|quiere|quieres|requiere|hay)\s+(?:que\s+haga\s+)?algo\s+mas"
+    r"(?:\s+(?:en\s+(?:lo\s+)?que|con\s+(?:lo\s+)?que|que)\s+(?:le\s+|te\s+)?(?:pueda|puedo)\s+(?:ayudar|servir|hacer)\w*"
+    r"(?:\s+por\s+(?:usted|ti))?)?"
+    r"|(?:que\s+)?(?:mas\s+)?(?:necesita|necesitas|desea|deseas)(?:\s+que\s+haga)?"
+    r"|(?:que\s+)?(?:deseas|desea|quieres|quiere)\s+que\s+(?:yo\s+)?haga\w*(?:\s+(?:por|para)\s+\w+)?"
+    r"|(?:que\s+)?(?:te|le)\s+gustaria\s+que\s+(?:yo\s+)?(?:haga|hablara|hable|ayude)\w*(?:\s+\w+){0,4}"
+    r"|estoy\s+(?:aqui\s+)?(?:para\s+(?:ayudar\w*|servir\w*|lo\s+que\s+necesite\w*)|a\s+(?:sus|tus)\s+ordenes)"
+    r"|(?:no\s+dude\s+en|no\s+dudes\s+en)\s+\w+.*"
+    r"|a\s+(?:sus|tus)\s+ordenes"
+    r")(?:\s*,?\s*senor)?\s*(?:hoy)?\s*[?!.]*$"
+)
+_ACCENTS = str.maketrans("áéíóúñü", "aeiounu")
+
+
+def strip_filler(text: str) -> str:
+    """Quita las muletillas de ayuda del final (ver _FILLER)."""
+    while True:
+        ends = _sentence_ends(text)
+        if len(ends) < 2:
+            return text
+        last = text[ends[-2] : ends[-1]].strip().lower().translate(_ACCENTS)
+        if not _FILLER.match(last):
+            return text
+        text = text[: ends[-2]].rstrip()
+
+
 def limit_sentences(text: str, n: int = 3) -> str:
     """Red de seguridad: se queda con las primeras n frases COMPLETAS (el
     modelo a veces se pasa del largo que se le pidio y la respuesta se lee en
-    voz alta). Antes de contar se limpia el markdown; ver clean_for_speech."""
-    text = clean_for_speech(text)
+    voz alta). Antes de contar se limpia el markdown (ver clean_for_speech) y
+    las muletillas de ayuda del final (ver strip_filler)."""
+    text = strip_filler(clean_for_speech(text))
     ends = _sentence_ends(text)
     if ends and ends[-1] < len(text.rstrip()):
         # la respuesta quedo a medias (se acabo max_tokens): esa cola sin
@@ -253,6 +305,113 @@ def chat(messages: list, tools: list | None = None, max_tokens: int = 300, timeo
     # sigue saliendo mezclada: se queda con lo que estaba en español (si hay
     # al menos una frase; si no, vacio y los llamadores responden algo generico)
     msg["content"] = _trim_to_sentence(best_prefix) if len(best_prefix.strip()) >= 10 else ""
+    return msg
+
+
+def chat_stream(messages: list, on_sentence, tools: list | None = None, max_tokens: int = 300,
+                max_sentences: int = 3, timeout: float = 60, slot: int = SLOT_CHAT) -> dict:
+    """Como chat(), pero va entregando cada frase COMPLETA a on_sentence(frase)
+    en cuanto el modelo la termina de escribir: Jarvis empieza a hablar la
+    primera mientras se genera el resto (en esta laptop el modelo escribe
+    ~9 tokens/s, asi que esperar la respuesta entera eran varios segundos de
+    silencio). Las frases ya salen limpias (clean_for_speech) y sin las
+    muletillas de ayuda (una muletilla solo se dice si es lo unico). Corta
+    tras max_sentences frases.
+
+    Devuelve el mensaje como chat(): {"content": lo que se entrego, "tool_calls": [...]}.
+    Si el modelo pide herramientas no se entrega texto. Si se sale a chino o
+    japones se corta ahi; si para entonces no se habia dicho nada, el
+    llamador puede reintentar con chat() (que ya reintenta esos casos)."""
+    ensure_ready()
+    payload = {
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.3,
+        "stream": True,
+        "cache_prompt": True,
+        "id_slot": slot,
+    }
+    if tools:
+        payload["tools"] = tools
+    if "qwen3" in MODEL_PATH.name.lower():
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    req = urllib.request.Request(
+        f"{BASE_URL}/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+
+    raw = ""  # todo el texto recibido
+    done_upto = 0  # hasta donde de `raw` ya se proceso en frases
+    said: list[str] = []
+    held: str | None = None  # una muletilla retenida: solo se dice si al final no hubo nada mas
+    calls: dict[int, dict] = {}
+    stopped = False
+    finish = None
+
+    def take(sentence: str) -> bool:
+        """Entrega (o descarta) una frase; False = ya no hace falta seguir."""
+        nonlocal held
+        sentence = clean_for_speech(sentence)
+        if not sentence:
+            return True
+        if _FILLER.match(sentence.lower().translate(_ACCENTS)):
+            if not said and held is None:
+                held = sentence
+            return True
+        said.append(sentence)
+        on_sentence(sentence)
+        return len(said) < max_sentences
+
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        for line in resp:
+            line = line.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                choice = json.loads(data)["choices"][0]
+            except (ValueError, KeyError, IndexError):
+                continue
+            finish = choice.get("finish_reason") or finish
+            delta = choice.get("delta") or {}
+            for tc in delta.get("tool_calls") or []:
+                entry = calls.setdefault(tc.get("index", 0), {"id": "", "type": "function",
+                                                             "function": {"name": "", "arguments": ""}})
+                entry["id"] = tc.get("id") or entry["id"]
+                fn = tc.get("function") or {}
+                entry["function"]["name"] += fn.get("name") or ""
+                entry["function"]["arguments"] += fn.get("arguments") or ""
+            piece = delta.get("content") or ""
+            if not piece or calls:
+                continue
+            raw += piece
+            bad = _CJK.search(raw, done_upto)
+            if bad:
+                logger.warning("Respuesta con caracteres CJK en streaming: %r", raw[:80])
+                raw = raw[: bad.start()]
+                stopped = True
+                break
+            for end in _sentence_ends(raw):
+                if end <= done_upto:
+                    continue
+                sentence, done_upto = raw[done_upto:end], end
+                if not take(sentence):
+                    stopped = True
+                    break
+            if stopped:
+                break
+
+    if not calls and not stopped and finish != "length" and raw[done_upto:].strip():
+        take(raw[done_upto:])  # la ultima frase, sin punto final (si se acabaron los tokens, quedo a medias: no)
+    if not said and held is not None:
+        said.append(held)
+        on_sentence(held)
+    msg = {"content": " ".join(said)}
+    if calls:
+        msg["tool_calls"] = [calls[i] for i in sorted(calls)]
     return msg
 
 

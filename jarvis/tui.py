@@ -712,6 +712,10 @@ class JarvisApp(App):
         self._reply_full, self._reply_shown = text, 0
         self.query_one("#reply", VerticalScroll).scroll_home(animate=False)  # una respuesta nueva se lee desde el principio
 
+    def ui_reply_append(self, text: str):
+        """Otra frase de la misma respuesta (llega mientras la IA sigue escribiendo)."""
+        self._reply_full = f"{self._reply_full} {text}".strip()
+
     def _type_reply(self):
         if self._reply_shown >= len(self._reply_full):
             return

@@ -16,5 +16,10 @@ if [ ! -x "$PY" ]; then
   exit 1
 fi
 
+# Whisper ya descargado: que no consulte a Hugging Face en cada arranque
+if ls "${HF_HOME:-$HOME/.cache/huggingface}"/hub/models--Systran--faster-whisper-* >/dev/null 2>&1; then
+  export HF_HUB_OFFLINE=1
+fi
+
 mkdir -p logs
 exec "$PY" -u -m jarvis.main "$@"

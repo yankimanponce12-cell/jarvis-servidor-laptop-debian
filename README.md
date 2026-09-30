@@ -113,25 +113,38 @@ tui.py + hud.py: interfaz de terminal (Textual)
   detecta "jarvis" casi sin gastar CPU, y Whisper solo corre en esas frases
   (y la orden solo vale si Whisper también escribe "Jarvis", porque Vosk da
   falsas alarmas).
-- **IA:** Qwen2.5 1.5B Q4 en llama.cpp, 2 hilos (con 4 no va más rápido):
-  ~20 tokens/s leyendo y ~11 tokens/s escribiendo. El prompt del agente con
-  las herramientas se procesa al arrancar (~45 s en segundo plano) y queda en
-  caché: después cada respuesta tarda unos 3-4 s.
+- **IA en la gráfica:** Qwen3 1.7B Q4 en llama.cpp con **Vulkan** sobre la
+  Radeon Vega 3 integrada: lee el prompt a ~76 tokens/s (la CPU, 20) y escribe
+  a ~9.5 tokens/s (casi igual que la CPU, lo limita la RAM compartida). Deja la
+  CPU libre para Whisper y la voz. Si Vulkan falla, cae solo a la CPU
+  (`JARVIS_LLM_GPU=0` lo fuerza). Cada prompt de sistema tiene su propio slot
+  de caché y se precalienta al abrir (~20 s en segundo plano).
+- **Respuestas en streaming:** Jarvis dice cada frase apenas la IA la termina
+  (la primera sale a los ~2-3 s) en vez de esperar la respuesta completa.
+- **Charla:** el prompt lleva ejemplos de charla (con un modelo chico cambian
+  más el tono que cualquier regla) y se quitan las muletillas de servicio al
+  cliente ("¿En qué más puedo ayudarle?"). Los chistes salen de una lista fija
+  (`chistes.py`): el modelo chico los contaba mal.
+- Probado y descartado: Qwen2.5 1.5B (se negaba a charlar), Qwen2.5 3B (el
+  doble de lento), decodificación especulativa con Qwen3 0.6B (no acelera en
+  esta gráfica), openWakeWord (no reconoce "Jarvis" en español).
 - **Voz:** Piper genera ~6 veces más rápido que tiempo real en la CPU.
 
 ## Requisitos (Debian 12)
 
 ```bash
-sudo apt install -y python3-venv libportaudio2 playerctl pulseaudio-utils espeak-ng flatpak
+sudo apt install -y python3-venv libportaudio2 playerctl pulseaudio-utils espeak-ng flatpak mesa-vulkan-drivers
 ```
 
 - `libportaudio2`: micrófono y audio (sin esto Jarvis solo abre en modo texto).
 - `playerctl`: pausar/reanudar música. `pulseaudio-utils` (`pactl`): bajar la
   música cuando Jarvis habla. `espeak-ng`: voz de respaldo.
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) compilado para CPU
-  (`llama-bXXXX-bin-ubuntu-x64.tar.gz` de sus releases funciona en Debian 12) y
-  el modelo GGUF. Por defecto `~/llama.cpp/llama-b11279/llama-server` y
-  `~/modelos/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`; se cambian con
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) en dos versiones de sus
+  releases (funcionan en Debian 12): Vulkan (`llama-bXXXX-bin-ubuntu-vulkan-x64`,
+  necesita `mesa-vulkan-drivers`) y CPU de respaldo (`llama-bXXXX-bin-ubuntu-x64`).
+  Por defecto `~/llama.cpp/llama-b11279-vulkan/llama-server`,
+  `~/llama.cpp/llama-b11279/llama-server` y `~/modelos/Qwen3-1.7B-Q4_K_M.gguf`
+  (`JARVIS_LLAMA_SERVER_GPU`, `JARVIS_LLAMA_SERVER`, `JARVIS_MODEL`); se cambian con
   `JARVIS_LLAMA_SERVER` y `JARVIS_MODEL` (o `JARVIS_LLM_URL` si ya tienes un
   servidor corriendo). `JARVIS_LLM_THREADS` cambia los hilos (2 por defecto).
 - Vosk: el modelo `vosk-model-small-es-0.42` en `~/modelos/` (o
@@ -147,12 +160,13 @@ sudo apt install -y python3-venv libportaudio2 playerctl pulseaudio-utils espeak
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
 
-# llama.cpp para CPU y el modelo
-mkdir -p ~/llama.cpp/llama-b11279 ~/modelos
-curl -L https://github.com/ggml-org/llama.cpp/releases/download/b11279/llama-b11279-bin-ubuntu-x64.tar.gz \
-  | tar xz --strip-components=1 -C ~/llama.cpp/llama-b11279
-curl -L -o ~/modelos/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf \
-  https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+# llama.cpp (Vulkan para la Vega + CPU de respaldo) y el modelo
+R=https://github.com/ggml-org/llama.cpp/releases/download/b11279
+mkdir -p ~/llama.cpp/llama-b11279 ~/llama.cpp/llama-b11279-vulkan ~/modelos
+curl -L $R/llama-b11279-bin-ubuntu-vulkan-x64.tar.gz | tar xz --strip-components=1 -C ~/llama.cpp/llama-b11279-vulkan
+curl -L $R/llama-b11279-bin-ubuntu-x64.tar.gz | tar xz --strip-components=1 -C ~/llama.cpp/llama-b11279
+curl -L -o ~/modelos/Qwen3-1.7B-Q4_K_M.gguf \
+  https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf
 
 # Vosk (detector de "jarvis")
 curl -LO https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip

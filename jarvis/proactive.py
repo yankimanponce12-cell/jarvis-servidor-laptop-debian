@@ -1,11 +1,14 @@
 import datetime
+import os
 import random
 import threading
 import time
 
 from jarvis import watch, weather
 
-IDLE_CHECKIN_SECONDS = 20 * 60  # avisa si pasaron 20 min sin ningun comando
+# "¿Sigue ahi, señor? Aquí estoy si necesita algo." cada 20 min sin actividad:
+# apagado por defecto (se sentia como servicio al cliente). JARVIS_CHECKIN_MIN=20 lo vuelve a prender.
+IDLE_CHECKIN_SECONDS = int(os.environ.get("JARVIS_CHECKIN_MIN", "0")) * 60
 CHECK_INTERVAL_SECONDS = 30  # cada cuanto revisa si ya paso el tiempo de espera
 WEATHER_CHECK_INTERVAL_SECONDS = 15 * 60  # cada cuanto se consulta el pronostico
 
@@ -24,7 +27,7 @@ def greeting_for_time(now: datetime.datetime | None = None) -> str:
         momento = "Buenas tardes"
     else:
         momento = "Buenas noches"
-    return f"{momento}, señor. Jarvis en línea y a sus órdenes."
+    return f"{momento}, señor. Jarvis en línea."
 
 
 class ProactiveSpeaker:
@@ -93,7 +96,7 @@ class ProactiveSpeaker:
                 self._check_rain()
                 self._push_weather_to_watch()
 
-            if time.time() - self._last_activity >= IDLE_CHECKIN_SECONDS:
+            if IDLE_CHECKIN_SECONDS and time.time() - self._last_activity >= IDLE_CHECKIN_SECONDS:
                 self._respond(random.choice(CHECKIN_PHRASES))
                 self._flush_pending_audio()
                 self.notify_activity()  # no repetir de inmediato

@@ -1,7 +1,7 @@
 import datetime
 import re
 
-from . import actions, agent, brain, demo, interrupt, memory, music, system, tv, weather, whatsapp
+from . import actions, agent, brain, chistes, demo, interrupt, memory, music, system, tv, weather, whatsapp
 
 EXIT_WORDS = [
     "adios", "adios jarvis", "hasta luego", "cierra jarvis",
@@ -143,6 +143,11 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
     if _matches_any(t, EXIT_WORDS):
         respond(_sir("Hasta luego"))
         return False
+
+    # chistes de una lista fija (ver chistes.py): la IA chica los contaba mal
+    if chistes.es_pedido(t) and not re.search(r"\b(?:youtube|video|whatsapp|mensaje)\b", t):
+        respond(chistes.uno())
+        return True
 
     # "pausa", "silencio", "para la musica", "callate"... (por voz, main.py ya
     # las atiende antes para cortar a Jarvis si esta hablando; esto cubre lo

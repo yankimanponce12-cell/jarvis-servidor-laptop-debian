@@ -54,6 +54,12 @@ class Hud:
         self._ui("ui_log", f"Jarvis › {text}", "#22d3ee")
         watch.send_response(text)
 
+    def append_response(self, text: str):
+        """Siguiente frase de una respuesta que se va generando (ver llm.chat_stream)."""
+        self._ui("ui_reply_append", text)
+        self._ui("ui_log", f"         {text}", "#22d3ee")
+        watch.send_response(text)
+
     def set_weather(self, temp: int, desc: str, code=None, is_day: bool = True, rain_prob=None, city: str = ""):
         """Titulo y panel de clima. code (WMO), is_day, rain_prob (%) y city
         eligen la escena animada; sin code solo se actualiza el titulo."""
