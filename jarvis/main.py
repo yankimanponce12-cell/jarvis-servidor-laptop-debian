@@ -14,7 +14,7 @@ import logging
 
 from jarvis import agent, audio_focus, brain, demo, interrupt, llm, stt_gpu, system, voice_config, voice_output, whatsapp
 from jarvis import server as jarvis_server
-from jarvis.commands import handle_command
+from jarvis.commands import _is_affirmative, handle_command
 from jarvis.hud import Hud
 from jarvis.proactive import ProactiveSpeaker, greeting_for_time
 from jarvis.tui import JarvisApp
@@ -32,6 +32,9 @@ HELP = """Uso: jarvis [opciones]
 # tras interrumpir a Jarvis, la frase que se estaba grabando empieza con el eco
 # de su voz: durante este rato se acepta la wake word en cualquier parte
 BARGE_GRACE_S = 12
+# Plática natural: si Jarvis termina con una pregunta, el microfono queda
+# abierto este tiempo y se le puede contestar sin decir "Jarvis"
+FOLLOW_UP_S = 7
 
 
 class Session:
@@ -59,6 +62,7 @@ class Session:
         # muestra en pantalla pero ya no se habla
         self._interrupted = threading.Event()
         self._barge_at = 0.0  # cuando se interrumpio a Jarvis por ultima vez
+        self._ask_pending = False  # lo ultimo que dijo Jarvis fue una pregunta sin contestar
         self._utt_ducked = False  # la frase en curso ya atenuo la musica (se oyo "Jarvis")
 
     # ---- salida / entrada ------------------------------------------------
@@ -69,6 +73,7 @@ class Session:
             self.hud.append_response(msg)
         else:
             self.hud.set_response(msg)
+        self._ask_pending = msg.rstrip().rstrip('"»”)').endswith("?")
         if self.muted or self._interrupted.is_set():
             return
         with audio_focus.ducked():  # la musica baja mientras Jarvis habla
@@ -77,6 +82,7 @@ class Session:
             self.hud.set_state("pensando" if self._busy else "inactivo")
 
     def escuchar(self) -> str:
+        self._ask_pending = False  # la pregunta se contesta aqui mismo
         self.hud.set_state("escuchando")
         respuesta = self.listener.listen_and_transcribe(on_partial=self.hud.set_heard)
         self.hud.set_heard(respuesta, final=True)
@@ -90,6 +96,7 @@ class Session:
         """Devuelve False si el usuario pidio salir."""
         self._busy = True
         self._interrupted.clear()
+        self._ask_pending = False
         self.hud.set_state("pensando")
         try:
             keep_going = handle_command(text, respond=self.respond, escuchar=escuchar, hud=self.hud)
@@ -103,7 +110,25 @@ class Session:
             self.hud.set_state("inactivo")
         if not self._barge_at:
             self._flush()  # (tras una interrupcion no: el usuario esta hablando)
+        if keep_going and self._ask_pending and not self._interrupted.is_set():
+            self._open_follow_up()
         return keep_going
+
+    def _open_follow_up(self):
+        """Jarvis termino con una pregunta: se le puede contestar sin "Jarvis"."""
+        if self.listener is None or self.push_to_talk:
+            return
+        self._ask_pending = False
+        self.listener.open_follow_up(FOLLOW_UP_S)
+        self.hud.set_state("escuchando")
+
+        def expire():
+            if not self._busy and not self.listener.follow_up_open():
+                self.hud.set_state("inactivo")
+
+        timer = threading.Timer(FOLLOW_UP_S + 0.5, expire)
+        timer.daemon = True
+        timer.start()
 
     # ---- callar / pausar -------------------------------------------------
     def _stop(self, command: str = "") -> bool:
@@ -245,6 +270,13 @@ class Session:
         barged = time.monotonic() - self._barge_at < BARGE_GRACE_S
         self._barge_at = 0.0
         command = extract_command(text)
+        if command is not None and self.listener is not None and self.listener.last_follow_up:
+            # contesto una pregunta de Jarvis: un "no" corto cierra la platica
+            if len(command.split()) <= 4 and _is_affirmative(command) is False:
+                release()
+                self.hud.set_heard(text, final=True)
+                threading.Thread(target=self.respond, args=("Muy bien, señor.",), daemon=True).start()
+                return
         if command is None and barged:
             command = find_command(text)
         if command is None:

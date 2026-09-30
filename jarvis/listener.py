@@ -5,6 +5,7 @@ import os
 import queue
 import re
 import threading
+import time
 import wave
 from pathlib import Path
 
@@ -444,9 +445,24 @@ class VoiceListener:
         # on_barge_in(texto) recibe lo que se oyo mientras tanto (ya confirmado por Whisper)
         self.barge_in_active = None
         self.on_barge_in = None
+        # plática: tras una pregunta de Jarvis, la siguiente frase vale sin "Jarvis"
+        self._follow_until = 0.0  # time.monotonic() hasta cuando puede EMPEZAR esa frase
+        self._direct = False  # listen_and_transcribe() en curso: esa frase es suya, no de aqui
+        self.last_follow_up = False  # la ultima frase cedida fue la respuesta a una pregunta
         self._ring = collections.deque(maxlen=int(BARGE_WINDOW_S / FRAME_S))
         self._barge_countdown = 0  # tramas que faltan para verificar una posible interrupcion
         self._barge_busy = False
+
+    def open_follow_up(self, seconds: float):
+        """Jarvis acaba de hacer una pregunta: la frase que se EMPIECE a decir
+        en los proximos `seconds` se toma aunque no diga "Jarvis"."""
+        self._follow_until = time.monotonic() + seconds
+
+    def close_follow_up(self):
+        self._follow_until = 0.0
+
+    def follow_up_open(self) -> bool:
+        return time.monotonic() <= self._follow_until
 
     def _speaking(self) -> bool:
         return self.barge_in_active is not None and self.barge_in_active()
@@ -546,8 +562,13 @@ class VoiceListener:
         q = queue.Queue()
         endpointer = Endpointer(make_vad(), wait_timeout=NO_SPEECH_TIMEOUT)
         print("Escuchando... habla ahora.")
-        with self._open_stream(q):
-            audio = self._next_utterance(q, endpointer)
+        self._direct = True
+        self.close_follow_up()  # la respuesta a esta pregunta la toma esta funcion
+        try:
+            with self._open_stream(q):
+                audio = self._next_utterance(q, endpointer)
+        finally:
+            self._direct = False
         if audio.size == 0:
             return ""
         text = self._safe_transcribe(audio, language)
@@ -584,11 +605,25 @@ class VoiceListener:
             while True:
                 audio = self._next_utterance(q, endpointer, language, spot=True)
                 for_jarvis = self._spotter.heard_final()
+                # ¿empezo dentro de la ventana de una pregunta? (1 s de margen por el
+                # silencio final que se recorta y la latencia de la cola)
+                started = time.monotonic() - audio.size / SAMPLE_RATE - 1.0
+                follow_up = bool(audio.size) and not self._direct and started <= self._follow_until
+                self.last_follow_up = False
                 if audio.size and self._speaking():
                     # frase que termino con Jarvis hablando: es su eco (una orden
                     # real ya lo habria cortado con las palabras clave)
                     audio = audio[:0]
                 text = raw = ""
+                if follow_up and not self._speaking():
+                    self.close_follow_up()  # una sola respuesta por pregunta
+                    raw = self._safe_transcribe(audio, language)
+                    text = (wakeword.with_wake_prefix(raw) or f"Jarvis, {raw}") if raw else ""
+                    self.last_follow_up = bool(text)
+                    _log_utterance(audio, for_jarvis, raw, text, "(respuesta a una pregunta de Jarvis)")
+                    if text or yield_empty:
+                        yield text
+                    continue
                 if audio.size and for_jarvis:
                     if on_partial is not None:
                         on_partial("Jarvis…")  # la interfaz baja la musica mientras Whisper transcribe
