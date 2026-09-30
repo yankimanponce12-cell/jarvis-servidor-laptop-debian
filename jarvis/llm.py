@@ -2,14 +2,14 @@
 una API compatible con OpenAI (/v1/chat/completions) con tool-calling gracias
 a --jinja. Brain y agente usan el MISMO modelo/servidor (uno solo en memoria).
 
-Corre en la CPU (esta laptop no tiene GPU NVIDIA): modelo chico (Qwen2.5 1.5B)
+Corre en la CPU (esta laptop no tiene GPU NVIDIA): modelo chico (Qwen3 1.7B)
 y los nucleos fisicos. El servidor se arranca solo, bajo demanda, si no
 hay uno escuchando ya; se puede sobreescribir todo con variables de entorno:
 
   JARVIS_LLAMA_SERVER  ruta al binario llama-server
   JARVIS_MODEL         ruta al .gguf
   JARVIS_LLM_URL       si ya tenes un servidor corriendo (no se arranca otro)
-  JARVIS_LLM_CTX       tamaño de contexto total (por defecto 4096, 2048 por slot)
+  JARVIS_LLM_CTX       tamaño de contexto total (por defecto 6144, 2048 por slot)
   JARVIS_LLM_THREADS   hilos de CPU (por defecto 2)
 """
 
@@ -32,12 +32,21 @@ LLAMA_SERVER = Path(
     os.environ.get("JARVIS_LLAMA_SERVER", Path.home() / "llama.cpp" / "llama-b11279" / "llama-server")
 )
 MODEL_PATH = Path(
-    os.environ.get("JARVIS_MODEL", Path.home() / "modelos" / "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf")
+    # comparado en esta CPU contra Qwen2.5 1.5B y 3B (34 pedidos al agente):
+    # mismos aciertos de herramientas que el 1.5B (22/34; el 3B saca 24 pero
+    # tarda el doble, ~8 s) y es el unico chico que charla bien: el 1.5B se
+    # negaba a contar chistes o a opinar ("como asistente de voz no puedo...")
+    os.environ.get("JARVIS_MODEL", Path.home() / "modelos" / "Qwen3-1.7B-Q4_K_M.gguf")
 )
-# Dos slots de 2048: uno se queda con el prompt del agente (+ herramientas) y el
-# otro con el de la charla (brain.py). Con uno solo se pisaban y cada cambio
-# volvia a procesar ~800 tokens de prompt: ~40 s en esta CPU (20 tokens/s).
-CONTEXT = os.environ.get("JARVIS_LLM_CTX", "4096")
+# Tres slots de 2048, uno por prompt de sistema: el del agente (+ herramientas),
+# el de las respuestas largas (agent._converse) y el de la charla (brain.py).
+# Con uno solo se pisaban y cada cambio volvia a procesar cientos de tokens de
+# prompt: ~40 s en esta CPU (20 tokens/s). La cache extra ocupa ~700 MB de RAM.
+CONTEXT = os.environ.get("JARVIS_LLM_CTX", "6144")
+# Cada prompt va a SU slot (id_slot): todos empiezan igual ("Tu nombre es
+# Jarvis..."), y eligiendo por parecido llama-server metia las respuestas largas
+# en el slot del agente y lo desalojaba (otra vez ~35 s procesando herramientas).
+SLOT_AGENT, SLOT_LONG, SLOT_CHAT = 0, 1, 2
 # 2 = los nucleos fisicos del Ryzen 3 2200U: con 4 hilos no va mas rapido (medido
 # con llama-bench) y deja sin CPU a Whisper y a la interfaz
 THREADS = os.environ.get("JARVIS_LLM_THREADS", "2")
@@ -79,7 +88,7 @@ def _start_server():
             "-ngl", "0",  # todo en CPU
             "-t", THREADS,
             "-c", CONTEXT,
-            "--parallel", "2",
+            "--parallel", "3",
             "--host", "127.0.0.1",
             "--port", str(PORT),
         ],
@@ -203,7 +212,7 @@ def _request(payload: dict, timeout: float) -> tuple[dict, str | None]:
     return choice["message"], choice.get("finish_reason")
 
 
-def chat(messages: list, tools: list | None = None, max_tokens: int = 300, timeout: float = 60) -> dict:
+def chat(messages: list, tools: list | None = None, max_tokens: int = 300, timeout: float = 60, slot: int = SLOT_CHAT) -> dict:
     """Una vuelta de chat. Devuelve el mensaje del asistente como dict
     ({"content": str, "tool_calls": [...]}). Lanza excepcion si el servidor
     no responde (los llamadores ya la atajan y responden algo generico)."""
@@ -218,9 +227,13 @@ def chat(messages: list, tools: list | None = None, max_tokens: int = 300, timeo
         # inventa la hora). Los saltos a chino se cubren con el filtro de abajo.
         "stream": False,
         "cache_prompt": True,  # reusa el prompt del sistema/historial ya procesado
+        "id_slot": slot,
     }
     if tools:
         payload["tools"] = tools
+    if "qwen3" in MODEL_PATH.name.lower():
+        # sin razonamiento: con el <think> cada respuesta tardaba varias veces mas
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
 
     best_prefix = ""
     for attempt in range(_MAX_ATTEMPTS):

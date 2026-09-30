@@ -1,7 +1,7 @@
 import datetime
 import re
 
-from . import actions, agent, brain, demo, interrupt, memory, music, system, weather, whatsapp
+from . import actions, agent, brain, demo, interrupt, memory, music, system, tv, weather, whatsapp
 
 EXIT_WORDS = [
     "adios", "adios jarvis", "hasta luego", "cierra jarvis",
@@ -9,7 +9,7 @@ EXIT_WORDS = [
     "ya termine", "apagate",
 ]
 LEADING_ARTICLES = re.compile(r"^(el|la|los|las|un|una)\s+")
-_MSG_VERB_RE = re.compile(r"^(?:mandale|manda|enviale|envia)\s+(?:un\s+)?mensaje\s+a\s+(.+)$")
+_MSG_VERB_RE = re.compile(r"^(?:mandale|manda|enviale|envia)\s+(?:un\s+)?(?:mensaje|whatsapp|wasap|wats)\s+a\s+(.+)$")
 _MSG_WRITE_RE = re.compile(r"^escribele\s+(?:un\s+mensaje\s+)?a\s+(.+)$")
 _HORA_RE = re.compile(
     r"\bque hora(?:s)? (?:es|son|tenemos|tienes|hay)\b|\b(?:dime|dame|decime|dinos|sabes|tienes|necesito saber|quiero saber|me dices)\b.*\bla hora\b"
@@ -51,12 +51,13 @@ DEMO_TEXT = (
     "Bluetooth cercanos, se los leo, y me empareja con el que elija. Le "
     "digo la batería, la temperatura y el estado del procesador, la memoria "
     "y la tarjeta gráfica, la hora, la fecha, el clima y la probabilidad de lluvia. Controlo la música "
-    "que esté sonando. Si quiere controlarme desde el celular, le muestro un "
+    "que esté sonando. Prendo y apago la tele de la sala, le abro Netflix o YouTube, y en modo "
+    "música pongo Spotify de la laptop en la tele. Si quiere controlarme desde el celular, le muestro un "
     "código QR. Tengo memoria: me acuerdo de su nombre y de lo que me pida "
     "anotar. Y todo lo demás lo converso con usted. Si quiere verlo en "
     "acción, dígame: hazme una demo."
 )
-_DIAS = ["lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"]
+_DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 _MESES = [
     "enero", "febrero", "marzo", "abril", "mayo", "junio",
     "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
@@ -67,10 +68,12 @@ AFFIRMATIVE_WORDS = [
     "afirmativo", "ok", "okay", "bueno", "correcto", "exacto",
     "efectivamente", "adelante", "hazlo", "simon", "sale", "de una",
     "por supuesto", "claro que si", "asi es", "eso es", "va que va",
+    "orale", "andale", "sale pues", "ponlo", "ponla", "si por favor", "arre", "chido",
 ]
 NEGATIVE_WORDS = [
     "no", "nel", "negativo", "para nada", "mejor no", "no gracias",
-    "ni loco", "paso",
+    "ni loco", "paso", "nop", "nope", "dejalo", "olvidalo", "cancela", "cancelalo",
+    "despues", "luego", "mejor luego", "ahorita no", "tampoco", "espera",
 ]
 
 
@@ -171,6 +174,11 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
                 respond(_sir("No pude generar el código QR"))
         return True
 
+    # la tele de la sala y los modos musica/juego: antes que system, que si no
+    # se quedaria con "sube el volumen de la tele" (volumen de la laptop)
+    if tv.handle(t, respond):
+        return True
+
     # controles del sistema (volumen exacto, brillo, wifi, bluetooth, bateria,
     # estado, medios). Va ANTES de las ramas de "pon ..."/"busca ..."/"abre
     # ...", que si no se comerian frases como "pon el volumen al 50" o "busca
@@ -185,11 +193,24 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
 
     contacto = _extract_message_contact(t)
     if contacto:
-        if escuchar is None:
-            respond(_sir("No puedo tomar dictado en este modo"))
-            return True
-        respond(f"¿Qué le digo a {contacto}, señor?")
-        mensaje = escuchar()
+        mensaje = ""
+        # "mandale un whatsapp a mama que ya voy": el mensaje viene en la misma frase.
+        # Contacto y mensaje se cortan del texto ORIGINAL (alineado caracter a
+        # caracter con `t`) para no perder las tildes: "mamá", no "mama".
+        original = text.strip().strip(".,!?¿¡")
+        dicho = re.search(r"\s+que\s+(.+)$", contacto)
+        if dicho:
+            mensaje = original[len(original) - len(dicho.group(1)):].strip()
+            contacto = contacto[: dicho.start()].strip()
+        at = t.rfind(contacto) if len(original) == len(t) else -1
+        if at >= 0:
+            contacto = original[at : at + len(contacto)]
+        if not dicho:
+            if escuchar is None:
+                respond(_sir("No puedo tomar dictado en este modo"))
+                return True
+            respond(f"¿Qué le digo a {contacto}, señor?")
+            mensaje = escuchar()
         if not mensaje.strip():
             respond(_sir("No escuché ningún mensaje, cancelo el envío"))
             return True

@@ -67,24 +67,23 @@ def classify_yes_no(text: str):
     respuesta no usa ninguna de las palabras clave conocidas. No toca el
     historial de la conversacion principal. Devuelve True/False, o None si
     no se pudo determinar (IA caida o respuesta ambigua)."""
-    prompt = (
-        "El usuario respondio esto a una pregunta de confirmacion "
-        f'(si quiere que se haga algo o no): "{text}"\n'
-        "¿Su respuesta significa que si quiere, o que no quiere? "
-        "Respondé con una sola palabra, sin explicacion: si o no."
-    )
+    # Con un modelo chico (Qwen3 1.7B) la version "¿significa si o no?" contestaba
+    # "si" a TODO, incluso a "no, mejor no". Asi, con ACEPTA/RECHAZA, en la duda
+    # se inclina a rechazar: mejor no hacer algo que hacerlo sin permiso.
+    messages = [
+        {"role": "system", "content": "Clasificas respuestas a una pregunta de confirmación. Contesta únicamente ACEPTA o RECHAZA."},
+        {"role": "user", "content": f'Respuesta del usuario: "{text}"'},
+    ]
     try:
-        # se espera una sola palabra ("si"/"no"); capar el generado evita
-        # que el modelo se ponga a explicar antes de contestar.
-        msg = llm.chat([{"role": "user", "content": prompt}], max_tokens=8, timeout=15)
-        respuesta = (msg.get("content") or "").strip().lower()
+        # una sola palabra; capar el generado evita que se ponga a explicar
+        msg = llm.chat(messages, max_tokens=6, timeout=15)
+        respuesta = (msg.get("content") or "").strip().upper()
     except Exception:
         return None
 
-    respuesta = respuesta.translate(str.maketrans("áéíóúñ", "aeioun"))
-    if respuesta.startswith("si"):
+    if respuesta.startswith("ACEPT"):
         return True
-    if respuesta.startswith("no"):
+    if respuesta.startswith("RECHAZ"):
         return False
     return None
 

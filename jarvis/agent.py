@@ -53,15 +53,16 @@ LONG_SYSTEM_PROMPT = (
     "'señor'. Lo que digas se lee en voz alta, así que habla en prosa "
     "natural: sin listas, sin numeración, sin asteriscos ni markdown y sin "
     "emojis. Llámalo solo 'señor', sin decir su nombre completo. El "
-    "usuario te pidió que le expliques o le cuentes algo: responde con un "
-    "párrafo de tres a cinco oraciones no muy largas (unas 60 a 90 palabras "
-    "en total), con lo más interesante o útil y sin rodeos, y termina "
-    "siempre la idea; nunca dejes una explicación a medias. Si pide varios "
-    "puntos (por ejemplo tres consejos), dilos todos dentro del párrafo "
-    "(primero, segundo, tercero)."
+    "usuario te pidió que le expliques o le cuentes algo: responde con dos "
+    "o tres oraciones no muy largas (unas 40 a 60 palabras en total), con lo "
+    "más interesante o útil y sin rodeos, y termina siempre la idea; nunca "
+    "dejes una explicación a medias. Si pide varios puntos (por ejemplo tres "
+    "consejos), dilos todos brevemente (primero, segundo, tercero)."
 )
-LONG_MAX_TOKENS = 320  # con holgura sobre ~90 palabras; si igual se pasa, llm.chat recorta a la ultima frase completa
-LONG_MAX_SENTENCES = 7
+# En esta CPU la IA escribe ~8 tokens/s: 90 palabras eran 20-28 s de espera.
+# Con ~60 palabras son ~10 s; si igual se pasa, llm.chat recorta a la ultima frase completa
+LONG_MAX_TOKENS = 170
+LONG_MAX_SENTENCES = 4
 
 _ACCENTS = str.maketrans("áéíóúñ", "aeioun")
 _WANTS_LONG = re.compile(
@@ -154,17 +155,20 @@ def _system(base: str) -> str:
 
 
 def warm():
-    """Procesa de antemano el prompt del sistema + herramientas (lo mas caro en
-    CPU) para que llama-server lo tenga en cache cuando llegue el primer pedido."""
-    llm.chat([{"role": "system", "content": _system(BASE_SYSTEM_PROMPT)}, {"role": "user", "content": "hola"}],
-             tools=TOOLS, max_tokens=1)
+    """Procesa de antemano los prompts del sistema (+ herramientas, lo mas caro
+    en CPU) para que llama-server los tenga en cache cuando llegue el primer pedido."""
+    hola = {"role": "user", "content": "hola"}
+    llm.chat([{"role": "system", "content": _system(BASE_SYSTEM_PROMPT)}, hola], tools=TOOLS, max_tokens=1, slot=llm.SLOT_AGENT)
+    llm.chat([{"role": "system", "content": _system(LONG_SYSTEM_PROMPT)}, hola], max_tokens=1, slot=llm.SLOT_LONG)
 
 
 def _chat(messages, tools=None):
     msg = llm.chat(
         [{"role": "system", "content": _system(BASE_SYSTEM_PROMPT)}] + messages,
         tools=tools,
-        max_tokens=160,
+        # 1-2 oraciones: ~90 tokens sobran; con 160 Qwen3 se extendia y tardaba ~20 s
+        max_tokens=90,
+        slot=llm.SLOT_AGENT,
     )
     if msg.get("content") and not msg.get("tool_calls"):
         msg["content"] = llm.limit_sentences(msg["content"])  # red de seguridad: hasta 3 frases completas
@@ -173,7 +177,8 @@ def _chat(messages, tools=None):
 
 def _converse(history: list) -> str:
     """Respuesta de un parrafo completo (sin herramientas) para lo que pide explicacion."""
-    msg = llm.chat([{"role": "system", "content": _system(LONG_SYSTEM_PROMPT)}] + history, max_tokens=LONG_MAX_TOKENS)
+    msg = llm.chat([{"role": "system", "content": _system(LONG_SYSTEM_PROMPT)}] + history, max_tokens=LONG_MAX_TOKENS,
+                   slot=llm.SLOT_LONG)
     return llm.limit_sentences(msg.get("content") or "", n=LONG_MAX_SENTENCES)
 
 

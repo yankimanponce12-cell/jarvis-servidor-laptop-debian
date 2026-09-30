@@ -10,7 +10,6 @@ import time
 import logging
 
 import numpy as np
-import sounddevice as sd
 
 logger = logging.getLogger("jarvis.voice")
 
@@ -55,6 +54,8 @@ class Player:
     def __init__(self, sample_rate: int, stop_event: threading.Event | None, latency=OUTPUT_LATENCY_S):
         self.sample_rate = sample_rate
         self.stop_event = stop_event
+        import sounddevice as sd  # aqui y no arriba: sin PortAudio (libportaudio2) Jarvis igual abre en modo texto
+
         self._stream = sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32", latency=latency)
         self._slice = max(int(sample_rate * SLICE_S), 256)
         self.stopped = False

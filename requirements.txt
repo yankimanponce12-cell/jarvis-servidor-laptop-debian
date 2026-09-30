@@ -1,5 +1,7 @@
-# nucleo: escucha (Whisper), TUI, servidor movil, WhatsApp, voz del sistema
+# nucleo: escucha (Vosk + Whisper), voz (Piper), TUI, servidor movil, WhatsApp
 faster-whisper
+vosk
+piper-tts
 sounddevice
 numpy
 soundfile

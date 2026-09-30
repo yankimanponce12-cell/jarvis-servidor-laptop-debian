@@ -1,18 +1,21 @@
 # Jarvis
 
-Asistente de voz en español para la **terminal de Linux** (probado en Fedora),
-inspirado en el JARVIS de Iron Man. Escucha una palabra de activación, entiende
-comandos (por reglas fijas o con un modelo local con tool-calling) y responde
-hablando. Todo el procesamiento de lenguaje corre en local.
+Asistente de voz en español para la **terminal de Linux**, inspirado en el
+JARVIS de Iron Man. Escucha su nombre, entiende comandos (por reglas fijas o con
+un modelo local con tool-calling) y responde hablando. Todo corre en local.
+
+Esta rama (`port-debian`) está adaptada a una laptop modesta **sin GPU dedicada**:
+Debian 12 con GNOME, AMD Ryzen 3 2200U (2 núcleos / 4 hilos), gráfica Vega
+integrada y 14 GB de RAM. Todo corre en la CPU.
 
 Se abre con un comando y vive en la terminal: un reactor animado en ASCII que
 cambia según lo que hace (cargando, en línea, escuchando, pensando, hablando) y
-se mueve con el audio real (tu voz al escuchar, la suya al hablar), un panel con
-lo que suena, subtítulos, historial y una línea para escribir comandos.
+se mueve con el audio real, un panel con lo que suena, subtítulos, historial y
+una línea para escribir comandos.
 
 Como Alexa: al oír "Jarvis" la música baja sola y vuelve al terminar; "Jarvis,
-pausa" / "silencio" pausa lo que suena, y "callate" (o `Esc`) lo corta si está
-hablando.
+pausa" / "silencio" pausa lo que suena, y "Jarvis, cállate" (o `Esc`) lo corta
+si está hablando.
 
 ```
 jarvis
@@ -20,9 +23,13 @@ jarvis
 
 ## Qué hace
 
-- Wake word ("Jarvis, ...") o modo push-to-talk (`--push-to-talk`).
+- Se activa con cualquier frase que diga "Jarvis": "Jarvis, pon rock", "oye
+  Jarvis…", "¿qué hora es, Jarvis?". También modo push-to-talk (`--push-to-talk`).
 - Comandos: WhatsApp Web, YouTube, búsquedas en Google, abrir/cerrar apps,
-  volumen (PipeWire), hora/fecha, clima, memoria a largo plazo (nombre, notas).
+  volumen (PipeWire), brillo, Wi-Fi, Bluetooth, batería, hora/fecha, clima,
+  memoria a largo plazo (nombre, notas).
+- La tele Samsung de la sala: prender/apagar, apps, volumen, "modo música"
+  (Spotify de la laptop por HDMI) y "modo juego" (PS5).
 - Charla libre y acciones ambiguas vía agente local (llama.cpp).
 - Comandos escritos en la misma terminal, y panel web para controlarlo desde el
   celular por HTTPS en la misma red (atajo `F3` = QR con el PIN).
@@ -32,7 +39,7 @@ jarvis
 ## Uso
 
 ```bash
-jarvis                  # wake word
+jarvis                  # escucha "Jarvis"
 jarvis --push-to-talk   # Enter con la línea vacía para hablar
 jarvis --no-mic         # solo texto (no carga Whisper ni abre el micrófono)
 jarvis --mute           # no habla en voz alta
@@ -41,7 +48,7 @@ jarvis --mute           # no habla en voz alta
 | Tecla    | Acción                                              |
 |----------|-----------------------------------------------------|
 | `Enter`  | envía lo escrito (vacío = hablar en push-to-talk)   |
-| `F2`     | cambia el motor de voz (xtts → openvoice → sistema) |
+| `F2`     | cambia el motor de voz (Piper ↔ espeak)             |
 | `Esc`    | callar a Jarvis si está hablando (o cerrar el QR)   |
 | `F3`     | QR + PIN del panel móvil                            |
 | `F4`     | silencio (no habla en voz alta)                     |
@@ -55,7 +62,7 @@ Logs en `logs/` (`jarvis.log`, `llama-server.log`).
 
 ## Comandos (voz o texto)
 
-Se dicen tras "Jarvis, ..." o se escriben en la línea de la terminal.
+Se dicen con "Jarvis" en la frase o se escriben en la línea de la terminal.
 
 | Área | Ejemplos |
 |---|---|
@@ -63,73 +70,107 @@ Se dicen tras "Jarvis, ..." o se escriben en la línea de la terminal.
 | Brillo | "sube el brillo", "pon el brillo al 50", "baja el brillo al mínimo" (nunca menos de 5%) |
 | Wi-Fi | "apaga el wifi", "enciende el wifi", "cómo está el wifi", "qué redes wifi hay" |
 | Bluetooth | "prende/apaga el bluetooth", "escanea dispositivos bluetooth" (los lee y pregunta a cuál emparejarte), "conecta con JBL", "desconecta los audífonos", "qué tengo conectado por bluetooth" |
-| Equipo | "cuánta batería tengo", "cómo está el sistema" (CPU, memoria y GPU), "temperatura del procesador" |
+| Equipo | "cuánta batería tengo", "cómo está el sistema" (CPU, memoria y gráfica), "temperatura del procesador" |
+| Tele | "prende/apaga la tele", "pon Netflix en la tele", "sube el volumen de la tele 5", "silencia la tele", "modo música" / "quita el modo música", "modo juego" |
 | Spotify (ncspot) | "abre spotify y pon canciones de rock", "pon canciones de acdc", "pon salsa", "pon thunderstruck", "cierra spotify" |
-| Parar | "pausa", "silencio", "para la música", "detén la música", "quítala" (pausa todo lo que suena); "callate", "basta", "deja de hablar" (lo calla si está hablando; mientras habla basta decirlo sin "Jarvis") |
+| Parar | "pausa", "silencio", "para la música", "detén la música", "quítala" (pausa todo lo que suena); "Jarvis, cállate", "basta", "deja de hablar" |
 | Música | "continúa" / "dale play" (reanuda lo que pausó), "siguiente canción", "qué está sonando" (vía playerctl) · "menea tu chapa" (canción fija, ver `SONG_SHORTCUTS` en `music.py`) |
 | Apps y web | "abre firefox", "cierra la calculadora", "busca X en Google", "pon música de X" (YouTube) |
 | Otros | "mándale un mensaje a X" (WhatsApp), "qué hora es", "qué clima hace en X", "¿va a llover al rato?", "probabilidad de lluvia", "acuérdate que ...", "mándame el QR" |
 | Demo | "hazme una demo" · "qué puedes hacer" (solo la describe) |
 
-Spotify: necesita `ncspot` con la sesión iniciada (Premium); se abre en una ventana de
-`alacritty` (o `kitty`) y se controla por su socket. "Rock" usa el filtro de género de
-Spotify y activa el modo aleatorio; artistas y canciones se buscan por texto. Una petición a
-la vez ("rock y de acdc" reproduce la primera). Spotify limita las búsquedas: con muchas
-seguidas puede tardar ~30 s en arrancar.
+Spotify: necesita `ncspot` con la sesión iniciada (Premium); se abre en una
+ventana de `alacritty` (o `gnome-terminal`) y se controla por su socket. "Rock"
+usa el filtro de género de Spotify y activa el modo aleatorio; artistas y
+canciones se buscan por texto.
 
-Notas: apagar el Wi-Fi avisa si es la única conexión. Emparejar un dispositivo
-nuevo acepta solo la confirmación de código en la laptop; en el otro aparato
-hay que aceptarla también. Jarvis solo controla lo que las herramientas del
-sistema permiten (`nmcli`, `bluetoothctl`, `brightnessctl`, `playerctl`, `wpctl`).
+La tele: usa los comandos `tele`, `modo-tele` y `modo-juego` de `~/.local/bin`
+(control remoto por red de Samsung Tizen). Si no existen, esas frases se ignoran.
 
 ## Arquitectura
 
 ```
-listener.py (Whisper) -> wakeword.py -> commands.py (regex, instantáneo)
-                                             |  si no coincide
-                                             v
-                                        agent.py (tool-calling)
+listener.py: Vosk ("jarvis", siempre escuchando, ~3% de un hilo)
+             └─ si lo oyó: Whisper base transcribe la frase y confirma "Jarvis"
+         -> wakeword.py -> commands.py (regex, instantáneo)
+                                |  si no coincide
+                                v
+                           agent.py (tool-calling)
 brain.py: charla simple y clasificación sí/no
-llm.py: cliente de llama.cpp (llama-server, API OpenAI); lo arranca solo
+llm.py: cliente de llama.cpp (llama-server en CPU, API OpenAI); lo arranca solo
 memory.py: memoria a largo plazo (SQLite)
-voice_output.py: XTTS v2, OpenVoice V2 o espeak-ng (intercambiables)
+voice_output.py: Piper (voz neuronal ligera) o espeak-ng (respaldo)
+tv.py: la tele de la sala
 server.py: API Flask HTTPS + web móvil (jarvis/web)
 tui.py + hud.py: interfaz de terminal (Textual)
 ```
 
-## Requisitos (Fedora)
+### Por qué así (medido en el Ryzen 3 2200U)
+
+- **Escucha:** Whisper tarda lo mismo con una frase corta que con una larga
+  (siempre procesa una ventana de 30 s): `base` ~2 s, `small` ~7 s. Por eso ya
+  no transcribe todo lo que oye: Vosk con una gramatica de una sola palabra
+  detecta "jarvis" casi sin gastar CPU, y Whisper solo corre en esas frases
+  (y la orden solo vale si Whisper también escribe "Jarvis", porque Vosk da
+  falsas alarmas).
+- **IA:** Qwen2.5 1.5B Q4 en llama.cpp, 2 hilos (con 4 no va más rápido):
+  ~20 tokens/s leyendo y ~11 tokens/s escribiendo. El prompt del agente con
+  las herramientas se procesa al arrancar (~45 s en segundo plano) y queda en
+  caché: después cada respuesta tarda unos 3-4 s.
+- **Voz:** Piper genera ~6 veces más rápido que tiempo real en la CPU.
+
+## Requisitos (Debian 12)
 
 ```bash
-sudo dnf install python3.12 portaudio espeak-ng
+sudo apt install -y python3-venv libportaudio2 playerctl pulseaudio-utils espeak-ng flatpak
 ```
 
-- Python 3.12 (los paquetes de voz aún no soportan 3.14).
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server`) y un modelo
-  GGUF con tool-calling. Por defecto `~/llama.cpp/llama-b11062/llama-server` y
-  `~/modelos/Qwen2.5-7B-Instruct-Q4_K_M.gguf`; se cambian con las variables
+- `libportaudio2`: micrófono y audio (sin esto Jarvis solo abre en modo texto).
+- `playerctl`: pausar/reanudar música. `pulseaudio-utils` (`pactl`): bajar la
+  música cuando Jarvis habla. `espeak-ng`: voz de respaldo.
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) compilado para CPU
+  (`llama-bXXXX-bin-ubuntu-x64.tar.gz` de sus releases funciona en Debian 12) y
+  el modelo GGUF. Por defecto `~/llama.cpp/llama-b11279/llama-server` y
+  `~/modelos/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`; se cambian con
   `JARVIS_LLAMA_SERVER` y `JARVIS_MODEL` (o `JARVIS_LLM_URL` si ya tienes un
-  servidor corriendo). Jarvis arranca `llama-server` en el puerto 8081 y lo cierra
-  al salir.
-- Reconocimiento de voz: faster-whisper (`small` por defecto) con un detector de
-  voz neuronal (Silero) para cortar las frases. `JARVIS_WHISPER_MODEL` cambia el
-  modelo (`medium`, `large-v3-turbo`... más preciso, pero más VRAM y descarga) y
-  `JARVIS_MIC` elige el micrófono (nombre, o parte, o número de `python -m
-  sounddevice`) si no quieres el predeterminado del sistema, p. ej. el de unos
-  audífonos Bluetooth, que suena mucho peor que el interno.
+  servidor corriendo). `JARVIS_LLM_THREADS` cambia los hilos (2 por defecto).
+- Vosk: el modelo `vosk-model-small-es-0.42` en `~/modelos/` (o
+  `JARVIS_VOSK_MODEL`).
+- Whisper: `JARVIS_WHISPER_MODEL` cambia el modelo (`base` por defecto; `small`
+  entiende mejor pero tarda ~7 s por frase aquí). `JARVIS_MIC` elige el
+  micrófono (nombre, parte, o número de `python -m sounddevice`).
 - Navegador Brave (para WhatsApp Web vía Selenium).
-- GPU NVIDIA con CUDA recomendada.
 
 ## Instalación
 
 ```bash
-python3.12 -m venv venv
+python3 -m venv venv
 venv/bin/pip install -r requirements.txt
 
-# opcional: Whisper en la GPU NVIDIA
-venv/bin/pip install -r requirements-cuda.txt
+# llama.cpp para CPU y el modelo
+mkdir -p ~/llama.cpp/llama-b11279 ~/modelos
+curl -L https://github.com/ggml-org/llama.cpp/releases/download/b11279/llama-b11279-bin-ubuntu-x64.tar.gz \
+  | tar xz --strip-components=1 -C ~/llama.cpp/llama-b11279
+curl -L -o ~/modelos/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf \
+  https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
 
-# opcional: voz clonada XTTS v2 (trae torch, varios GB)
-venv/bin/pip install -r requirements-xtts.txt
+# Vosk (detector de "jarvis")
+curl -LO https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip
+unzip vosk-model-small-es-0.42.zip -d ~/modelos && rm vosk-model-small-es-0.42.zip
+
+# voces de Piper (en voces/, ignorada por git)
+mkdir -p voces && cd voces
+B=https://huggingface.co/rhasspy/piper-voices/resolve/main/es
+for v in es_MX/ald/medium/es_MX-ald-medium es_ES/davefx/medium/es_ES-davefx-medium; do
+  curl -LO "$B/$v.onnx" && curl -LO "$B/$v.onnx.json"
+done
+cd ..
+
+# ncspot: el binario oficial pide glibc 2.39 (Debian 12 trae 2.36), asi que va por Flathub
+flatpak install --user flathub io.github.hrkfdn.ncspot
+flatpak override --user --filesystem=xdg-run/ncspot:create --filesystem=xdg-cache/ncspot:create \
+  --filesystem=xdg-config/ncspot:create io.github.hrkfdn.ncspot
+printf '#!/bin/sh\nexec flatpak run io.github.hrkfdn.ncspot "$@"\n' > ~/.local/bin/ncspot && chmod +x ~/.local/bin/ncspot
 
 # comando `jarvis` disponible desde cualquier carpeta
 ln -sf "$PWD/bin/jarvis" ~/.local/bin/jarvis
@@ -141,49 +182,18 @@ Ubicación para el clima (`local_config.json`, ignorado por git):
 cp local_config.example.json local_config.json   # y edita tus valores
 ```
 
-Si el archivo existe, esa es la ubicación del clima (misma respuesta en casa, en
-la escuela o con datos móviles). Con `"use_ip": true` Jarvis se ubica por la IP de
-la red y el archivo queda solo como respaldo; sin archivo, se ubica por IP y si
-falla usa Ciudad de México. "Qué clima hace en X" siempre usa X.
+Si el archivo existe, esa es la ubicación del clima. Con `"use_ip": true`
+Jarvis se ubica por la IP de la red y el archivo queda solo como respaldo; sin
+archivo, se ubica por IP y si falla usa Ciudad de México. "Qué clima hace en X"
+siempre usa X.
 
 ### Voz
 
-Sin nada más, Jarvis habla con **espeak-ng** (voz robótica, sin descargas). Para
-una voz clonada pon un audio de **tu propia voz** (o de una que tengas derecho a
-usar), de ~10-30 s, en `samples/jarvis_reference.wav`; con eso `F2` cambia a XTTS.
-Si el motor elegido falla al cargar, Jarvis cae solo a espeak-ng en vez de
-quedarse mudo.
-
-### Motor de voz OpenVoice (opcional)
-
-Es ~4x más rápido que XTTS pero se parece un poco menos a la voz de referencia.
-Corre como proceso aparte (`openvoice_server/serve.py`) con su propio venv,
-porque sus dependencias chocan con las de XTTS.
-
-```bash
-cd openvoice_server
-git clone https://github.com/myshell-ai/OpenVoice.git
-cd OpenVoice
-
-# Python 3.10 para este venv (los pines viejos no tienen wheels en versiones nuevas)
-python3.10 -m venv venv
-
-# antes de instalar, en setup.py cambia 'faster-whisper==0.9.0' por 'faster-whisper>=1.0'
-venv/bin/pip install -e .
-venv/bin/pip install "setuptools<81"          # librosa==0.9.1 necesita pkg_resources
-venv/bin/pip install git+https://github.com/myshell-ai/MeloTTS.git
-venv/bin/python -m unidic download
-
-# el .zip de la doc oficial da 404: usa el mirror de Hugging Face
-venv/bin/pip install "huggingface_hub[cli]"
-venv/bin/hf download myshell-ai/OpenVoiceV2 --local-dir checkpoints_v2
-
-# autoriza UNA vez el VAD de silero (pide confirmación interactiva)
-venv/bin/python -c "import torch; torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True, onnx=False)"
-```
-
-Jarvis arranca `serve.py` solo, bajo demanda, cuando eliges esta voz (escucha en
-`127.0.0.1:8766`).
+Jarvis habla con **Piper** (voz neuronal de ~60 MB, sin GPU). La voz se elige
+con `"voice"` en `voice_config.json` (nombre del `.onnx` en `voces/`, p. ej.
+`"es_ES-davefx-medium"`) o con la variable `JARVIS_VOICE`. Si Piper falla,
+Jarvis cae solo a **espeak-ng** (robótica) en vez de quedarse mudo; `F2`
+cambia entre las dos.
 
 ## Panel móvil
 
@@ -195,13 +205,13 @@ están en `.gitignore`. Pulsa `F3` o di "Jarvis, mándame el QR" para escanearlo
 
 Credenciales (`secrets/`, `*.pem`, `server_token.txt`), memoria y logs
 (`jarvis_memory.db`, `logs/`), perfil de WhatsApp (`whatsapp_profile/`),
-audio de referencia (`samples/`), configuración local, binarios y modelos.
+voces (`voces/`), configuración local, binarios y modelos.
 
 ## Licencias y avisos
 
-- XTTS v2 se distribuye bajo la licencia CPML de Coqui: **uso no comercial**.
-- OpenVoice (MyShell) y sus checkpoints tienen su propia licencia; no se
-  incluyen aquí.
+- Las voces de Piper tienen cada una su licencia (ver su `.onnx.json` y
+  [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)).
+- Qwen2.5 se distribuye bajo la licencia Apache 2.0; Vosk bajo Apache 2.0.
 - Este proyecto es un experimento personal y no está afiliado a Marvel ni a
   Disney.
 - Ten cuidado con el PIN y el servidor: solo debe usarse en redes de
