@@ -50,7 +50,7 @@ class VoiceEngine:
     def _load(self, engine: str):
         if engine == "piper":
             if self._piper is None:
-                self._piper = PiperSpeaker(voice_config.get_voice())
+                self._piper = PiperSpeaker(voice_config.get_voice(), **voice_config.piper_options())
         elif self._system is None:
             self._system = SystemSpeaker()
 

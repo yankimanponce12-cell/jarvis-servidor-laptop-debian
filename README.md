@@ -161,7 +161,7 @@ unzip vosk-model-small-es-0.42.zip -d ~/modelos && rm vosk-model-small-es-0.42.z
 # voces de Piper (en voces/, ignorada por git)
 mkdir -p voces && cd voces
 B=https://huggingface.co/rhasspy/piper-voices/resolve/main/es
-for v in es_MX/ald/medium/es_MX-ald-medium es_ES/davefx/medium/es_ES-davefx-medium; do
+for v in es_ES/sharvard/medium/es_ES-sharvard-medium; do
   curl -LO "$B/$v.onnx" && curl -LO "$B/$v.onnx.json"
 done
 cd ..
@@ -189,9 +189,12 @@ siempre usa X.
 
 ### Voz
 
-Jarvis habla con **Piper** (voz neuronal de ~60 MB, sin GPU). La voz se elige
-con `"voice"` en `voice_config.json` (nombre del `.onnx` en `voces/`, p. ej.
-`"es_ES-davefx-medium"`) o con la variable `JARVIS_VOICE`. Si Piper falla,
+Jarvis habla con **Piper** (voz neuronal de ~70 MB, sin GPU): por defecto la
+voz de hombre de `es_ES-sharvard-medium` con el **estilo JARVIS** (un poco más
+grave y pausada, con un eco metálico muy corto y una sala suave). En
+`voice_config.json` se cambia la voz (`"voice"`: nombre del `.onnx` en
+`voces/`, o la variable `JARVIS_VOICE`), el hablante (`"speaker"`: en
+sharvard 0 = hombre, 1 = mujer) y el efecto (`"efecto": false` lo quita). Si Piper falla,
 Jarvis cae solo a **espeak-ng** (robótica) en vez de quedarse mudo; `F2`
 cambia entre las dos.
 

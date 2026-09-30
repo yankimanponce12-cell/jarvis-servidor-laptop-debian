@@ -58,6 +58,18 @@ def get_voice() -> str | None:
     return voice if voice in tts_piper.installed_voices() else None
 
 
+def piper_options() -> dict:
+    """Hablante y estilo guardados en voice_config.json ("speaker", "efecto");
+    sin nada guardado, los de tts_piper (sharvard hombre con estilo JARVIS)."""
+    data = _read()
+    opts = {}
+    if isinstance(data.get("speaker"), int):
+        opts["speaker"] = data["speaker"]
+    if isinstance(data.get("efecto"), bool):
+        opts["jarvis_fx"] = data["efecto"]
+    return opts
+
+
 def set_voice(voice: str):
     if voice not in tts_piper.installed_voices():
         raise ValueError(f"voz no instalada: {voice!r} (hay: {tts_piper.installed_voices()})")
