@@ -292,7 +292,8 @@ class Session:
         personalidad.Comentarista(self.respond, self._flush, lambda: self._ultima_actividad,
                                   ocupado=lambda: self._busy).start()
         avisos.MonitorBateria(self.respond).start()
-        self.telegram = telegram.Bot(self._remoto, self._remoto_especial, hud=hud)
+        self.telegram = telegram.Bot(self._remoto, self._remoto_especial, transcribir=self._transcribir_audio,
+                                     sintetizar=voice_output.synthesize_wav_bytes, hud=hud)
         self.telegram.start()
         if not telegram.configurado():
             hud.log("Telegram sin configurar: venv/bin/python -m jarvis.telegram configurar <TOKEN>", "dim")
@@ -421,19 +422,28 @@ class Session:
             self._cmd_lock.release()
 
     def _remoto_especial(self, text: str):
-        """"estado" / "¿está todo bien en casa?" y "foto": no pasan por commands.py."""
+        """"estado" / "¿está todo bien en casa?" y "foto": no pasan por commands.py.
+        Devuelve {"texto": ..., "foto": jpg} o None."""
         n = interrupt.normalize(text)
         if re.search(r"^/?estado$|\b(?:todo bien|todo en orden|como esta la casa|como va la casa|que hay de nuevo)\b", n):
-            telegram.enviar(avisos.estado_casa())
-            return True
+            return {"texto": avisos.estado_casa()}
         if vigilancia.pide_foto(n):
             jpg, error = vigilancia.foto_del_cuarto()
             if jpg:
-                telegram.enviar_foto(jpg, f"El cuarto a las {time.strftime('%H:%M')}, señor.")
-            else:
-                telegram.enviar(f"No pude tomar la foto, señor: {error}.")
-            return True
+                return {"foto": jpg, "texto": f"El cuarto a las {time.strftime('%H:%M')}, señor."}
+            return {"texto": f"No pude tomar la foto, señor: {error}."}
         return None
+
+    def _transcribir_audio(self, audio) -> str:
+        """Nota de voz de Telegram (mono 16 kHz) -> texto, con el mismo Whisper del
+        microfono (en la grafica; si no, en la CPU)."""
+        if self.listener is not None:
+            return self.listener.transcribe_array(audio)
+        from jarvis.listener import WAKE_WORD_PROMPT, clean_transcript
+
+        if not stt_gpu.start(WAKE_WORD_PROMPT):  # con --no-mic no hay escucha: se arranca aparte
+            raise RuntimeError("Whisper no está disponible sin el micrófono")
+        return clean_transcript(stt_gpu.transcribe(audio, 16000))
 
     # ---- eventos de la interfaz -----------------------------------------
     def on_text(self, text: str):

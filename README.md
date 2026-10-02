@@ -47,6 +47,8 @@ jarvis
   alguien entró (vigilancia, con foto), la alarma no se apagó, batería baja y
   recordatorios. Configurar una vez: `venv/bin/python -m jarvis.telegram
   configurar <TOKEN de @BotFather>` y mandarle un mensaje al bot.
+  Texto se contesta con texto; una nota de voz se transcribe con el mismo
+  Whisper del micrófono y se contesta con una nota de voz de Jarvis.
 - Avisos proactivos (aviso de lluvia) y opcionalmente un reloj ESP32-S3 que
   muestra el estado de Jarvis (`jarvis/watch.py`).
 

@@ -11,22 +11,33 @@ y luego se le manda cualquier mensaje al bot: ese chat queda vinculado
 (telegram_config.json, ignorado por git). Los mensajes de otros chats se
 ignoran sin contestar.
 
-Sin librerías extra: la API HTTP de Telegram con requests y long polling
-(getUpdates con timeout), así no hace falta abrir ningún puerto del router."""
+Si le escribe texto, contesta con texto; si le manda una nota de voz, la
+transcribe con el mismo Whisper del micrófono y contesta con una nota de voz
+con la voz de Jarvis (y lo que entendió como pie del audio).
 
+Sin librerías extra: la API HTTP de Telegram con requests y long polling
+(getUpdates con timeout), así no hace falta abrir ningún puerto del router.
+Las notas de voz (OGG Opus) las lee y escribe soundfile (libsndfile)."""
+
+import io
 import json
 import logging
+import re
 import sys
 import threading
 import time
 from pathlib import Path
 
+import numpy as np
 import requests
 
 log = logging.getLogger("jarvis.alarma")  # mismo jarvis.log (el handler lo pone alarma.py)
 
 CONFIG_FILE = Path(__file__).resolve().parent.parent / "telegram_config.json"
 API = "https://api.telegram.org/bot{token}/{metodo}"
+ARCHIVOS = "https://api.telegram.org/file/bot{token}/{ruta}"
+MAX_AUDIO_S = 120  # notas de voz mas largas se cortan (Whisper va en pedazos de TROZO_S)
+TROZO_S = 14  # whisper-server procesa ventanas de 15 s (stt_gpu.AUDIO_CTX)
 POLL_S = 50  # long polling: Telegram contesta en cuanto llega un mensaje
 MAX_TEXTO = 4000  # Telegram corta en 4096
 
@@ -38,6 +49,7 @@ AYUDA = (
     "• activa la vigilancia / ¿quién vino?\n"
     "• recuérdame sacar la ropa en 40 minutos\n"
     "• alarma a las 6 de la mañana"
+    "\n\nSi me manda una nota de voz, le contesto con voz."
 )
 
 
@@ -91,15 +103,68 @@ def enviar_foto(jpg: bytes, texto: str = "") -> bool:
         return False
 
 
+def enviar_voz(ogg: bytes, texto: str = "") -> bool:
+    if not configurado():
+        return False
+    try:
+        _api("sendVoice", timeout=60, data={"chat_id": _config()["chat_id"], "caption": texto[:1000]},
+             files={"voice": ("jarvis.ogg", ogg, "audio/ogg")})
+        return True
+    except Exception as exc:
+        log.warning(f"Telegram: no pude mandar el audio ({exc})")
+        return False
+
+
+# ------------------------------------------------------------------ audio --
+def _descargar(file_id: str) -> bytes:
+    ruta = _api("getFile", data={"file_id": file_id})["file_path"]
+    r = requests.get(ARCHIVOS.format(token=_config()["token"], ruta=ruta), timeout=60)
+    r.raise_for_status()
+    return r.content
+
+
+def _remuestrear(x: np.ndarray, de: int, a: int) -> np.ndarray:
+    if de == a or not x.size:
+        return x
+    n = int(round(x.size * a / de))
+    return np.interp(np.linspace(0, x.size - 1, n), np.arange(x.size), x).astype("float32")
+
+
+def audio_16k(datos: bytes) -> np.ndarray:
+    """Nota de voz (OGG Opus, u otro formato que lea libsndfile) -> mono 16 kHz."""
+    import soundfile as sf
+    x, sr = sf.read(io.BytesIO(datos), dtype="float32", always_2d=True)
+    x = x.mean(axis=1)[: sr * MAX_AUDIO_S]
+    return _remuestrear(x, sr, 16000)
+
+
+def nota_de_voz(wav: bytes) -> bytes:
+    """WAV de la voz de Jarvis -> OGG Opus a 48 kHz (lo que Telegram muestra como nota de voz)."""
+    import soundfile as sf
+    x, sr = sf.read(io.BytesIO(wav), dtype="float32", always_2d=True)
+    x = _remuestrear(x.mean(axis=1), sr, 48000)
+    buf = io.BytesIO()
+    sf.write(buf, x, 48000, format="OGG", subtype="OPUS")
+    return buf.getvalue()
+
+
+def para_decir(texto: str) -> str:
+    """Sin emojis ni viñetas: la voz los leería raro o se trabaría."""
+    texto = re.sub(r"[^\w\s.,;:¿?¡!%()«»'\"/-]", " ", texto)
+    return re.sub(r"[ \t]+", " ", texto).strip()
+
+
 class Bot:
     """Hilo que recibe los mensajes del dueño. ejecutar(texto) -> lista de
     respuestas (main.py: el mismo handle_command que la voz, sin hablar en
-    voz alta). especiales(texto) -> respuesta o None para "estado" y "foto",
-    que no pasan por commands.py."""
+    voz alta). especiales(texto) -> {"texto": ..., "foto": jpg} o None para
+    "estado" y "foto", que no pasan por commands.py."""
 
-    def __init__(self, ejecutar, especiales, hud=None):
+    def __init__(self, ejecutar, especiales, transcribir=None, sintetizar=None, hud=None):
         self._ejecutar = ejecutar
         self._especiales = especiales
+        self._transcribir = transcribir  # audio mono 16 kHz -> texto (Whisper)
+        self._sintetizar = sintetizar  # texto -> WAV con la voz de Jarvis
         self._hud = hud
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True, name="telegram")
@@ -130,25 +195,64 @@ class Bot:
                 if (msg.get("chat") or {}).get("id") != dueno:
                     continue  # otro chat: ni se contesta
                 texto = (msg.get("text") or "").strip()
+                audio = msg.get("voice") or msg.get("audio")
                 if texto:
                     threading.Thread(target=self._atender, args=(texto,), daemon=True).start()
+                elif audio:
+                    threading.Thread(target=self._atender_audio, args=(audio["file_id"],), daemon=True).start()
 
-    def _atender(self, texto: str):
-        log.info(f"Telegram: {texto!r}")
+    def _atender_audio(self, file_id: str):
+        """Nota de voz: se transcribe y se contesta con otra nota de voz."""
+        if self._transcribir is None:
+            enviar("Por ahora solo entiendo texto, señor.")
+            return
+        try:
+            x = audio_16k(_descargar(file_id))
+            trozo = 16000 * TROZO_S
+            texto = " ".join(t for t in (self._transcribir(x[i : i + trozo]).strip()
+                                         for i in range(0, x.size, trozo)) if t).strip()
+        except Exception as exc:
+            log.exception("Telegram: no pude leer el audio")
+            enviar(f"No pude escuchar el audio, señor: {exc}")
+            return
+        texto = re.sub(r"^\W*jarvis\W*", "", texto, flags=re.IGNORECASE).strip()  # "Jarvis, prende la tele"
+        if not texto:
+            self._contestar("No le entendí, señor. ¿Puede repetirlo?", por_voz=True)
+            return
+        self._atender(texto, por_voz=True)
+
+    def _contestar(self, texto: str, por_voz: bool, entendi: str = ""):
+        if por_voz and self._sintetizar is not None:
+            try:
+                wav = self._sintetizar(para_decir(texto))
+                if wav and enviar_voz(nota_de_voz(wav), f"🎙 «{entendi}»" if entendi else ""):
+                    return
+            except Exception:
+                log.exception("Telegram: no pude armar la nota de voz")
+        enviar((f"🎙 «{entendi}»\n" if entendi else "") + texto)  # sin voz: al menos el texto
+
+    def _atender(self, texto: str, por_voz: bool = False):
+        log.info(f"Telegram{' (audio)' if por_voz else ''}: {texto!r}")
         if self._hud:
-            self._hud.log(f"📱 Telegram: {texto}")
+            self._hud.log(f"📱 Telegram{' 🎙' if por_voz else ''}: {texto}")
+        entendi = texto if por_voz else ""
         try:
             if texto.lower() in ("/start", "/ayuda", "/help", "ayuda"):
                 enviar(AYUDA)
                 return
             especial = self._especiales(texto)
             if especial is not None:
-                return  # especiales() ya contestó (texto y/o foto)
+                if especial.get("foto"):
+                    enviar_foto(especial["foto"], especial.get("texto", ""))
+                else:
+                    self._contestar(especial["texto"], por_voz, entendi)
+                return
             respuestas = self._ejecutar(texto.lstrip("/"))
-            enviar("\n".join(respuestas) or "Hecho, señor.")
+            texto_resp = (" " if por_voz else "\n").join(respuestas) or "Hecho, señor."
+            self._contestar(texto_resp, por_voz, entendi)
         except Exception as exc:
             log.exception("Telegram: el comando fallo")
-            enviar(f"No pude hacerlo, señor: {exc}")
+            self._contestar(f"No pude hacerlo, señor: {exc}", por_voz, entendi)
 
 
 # ------------------------------------------------------------ configurar --
