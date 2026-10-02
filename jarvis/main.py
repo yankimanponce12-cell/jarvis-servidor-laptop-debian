@@ -426,21 +426,12 @@ class Session:
         if re.search(r"^/?estado$|\b(?:todo bien|todo en orden|como esta la casa|como va la casa|que hay de nuevo)\b", n):
             telegram.enviar(avisos.estado_casa())
             return True
-        if re.search(r"^/?foto$|\b(?:manda(?:me)?|toma|tomame|enviame) (?:una )?foto\b|\bque (?:se ve|hay en el cuarto)\b", n):
-            cam = self.camara
-            if cam is None:
-                telegram.enviar("La cámara no está lista, señor.")
-                return True
-            prendi = not cam.activa
-            if prendi:
-                cam.start()
-            jpg = cam.foto(espera=25)
-            if prendi and not camara.habilitada() and not vigilancia.activa():
-                threading.Thread(target=cam.stop, daemon=True).start()
+        if vigilancia.pide_foto(n):
+            jpg, error = vigilancia.foto_del_cuarto()
             if jpg:
                 telegram.enviar_foto(jpg, f"El cuarto a las {time.strftime('%H:%M')}, señor.")
             else:
-                telegram.enviar("No pude tomar la foto, señor" + (f": {cam.error}" if cam.error else "."))
+                telegram.enviar(f"No pude tomar la foto, señor: {error}.")
             return True
         return None
 

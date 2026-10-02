@@ -98,7 +98,7 @@ Se dicen con "Jarvis" en la frase o se escriben en la línea de la terminal.
 | Cámara | "aprende mi cara", "olvida mi cara", "apaga/prende la cámara", "cómo está la cámara" · gestos ✋ 👍 ✌ |
 | Alarma | "alarma a las 6 de la mañana", "despiértame en 20 minutos", "a qué hora está la alarma", "cancela la alarma" · al sonar: ✋ palma, "ya me desperté", "apágala" o "pausa" |
 | Recordatorios | "recuérdame sacar la ropa en 40 minutos", "recuérdame a las 5 llamar a mi mamá", "pon un temporizador de 10 minutos", "cuánto le falta al temporizador", "qué recordatorios tengo", "cancela el temporizador" |
-| Vigilancia | "activa la vigilancia" (si entra alguien que no eres tú, foto al celular; se apaga sola al reconocerte), "desactiva la vigilancia", "quién vino mientras no estaba", "alguien entró hoy" |
+| Vigilancia | "mándame una foto del cuarto" (al Telegram), "activa la vigilancia" (si entra alguien que no eres tú, foto al celular; se apaga sola al reconocerte), "desactiva la vigilancia", "quién vino mientras no estaba", "alguien entró hoy" |
 | Personalidad | comenta solo si te desvelas (pasada la 1 AM) o llevas 2/4/6 horas en la PS5 · "cuánto llevo jugando", "sin comentarios" / "vuelve a comentar" |
 | Demo | "hazme una demo" · "qué puedes hacer" (solo la describe) |
 

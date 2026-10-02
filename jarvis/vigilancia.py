@@ -195,6 +195,43 @@ def en_llegada(nombre: str | None, respond) -> bool:
     return True
 
 
+# ------------------------------------------------------------------- foto --
+_FOTO = (r"\b(?:foto|fotito|fotografia|imagen|captura)\b"
+         r"|\b(?:ver|ensename|muestrame|como esta|como se ve|que se ve en|que hay en) (?:el|mi) cuarto\b|^que se ve$")
+
+
+def pide_foto(n: str) -> bool:
+    """"foto", "mandame una foto del cuarto", "quiero ver el cuarto". n: normalizado."""
+    return bool(re.search(_FOTO, n)) and not re.search(r"\b(?:whatsapp|perfil|youtube|google)\b", n)
+
+
+def foto_del_cuarto() -> tuple[bytes | None, str]:
+    """Foto de la camara (la prende un momento si estaba apagada). (jpg, error)."""
+    from . import camara as camara_mod
+    cam = _camara()
+    if cam is None:
+        return None, "la cámara no está lista"
+    prendi = not cam.activa
+    if prendi:
+        cam.start()
+    jpg = cam.foto(espera=25)  # recien prendida tarda en cargar los modelos
+    if prendi and not camara_mod.habilitada() and not activa():
+        threading.Thread(target=cam.stop, daemon=True).start()
+    return jpg, ("" if jpg else cam.error or "no pude tomar la foto")
+
+
+def mandar_foto() -> tuple[bool, str]:
+    """Toma la foto y la manda por Telegram. (ok, error)."""
+    from . import telegram
+    if not telegram.configurado():
+        return False, "Telegram no está configurado"
+    jpg, error = foto_del_cuarto()
+    if not jpg:
+        return False, error
+    ok = telegram.enviar_foto(jpg, f"El cuarto a las {datetime.datetime.now():%H:%M}, señor.")
+    return ok, "" if ok else "no pude mandarla (¿sin internet?)"
+
+
 # --------------------------------------------------------------- comandos --
 _VIGILA = r"\b(?:vigilancia|vigila|vigilar|vigilame|vigilando|modo centinela)\b"
 _VISITAS = (r"\b(?:quien|quienes|alguien|alguno|nadie)\b.*\b(?:vino|vinieron|entro|entraron|paso|pasaron|llego|llegaron|"
@@ -203,6 +240,11 @@ _VISITAS = (r"\b(?:quien|quienes|alguien|alguno|nadie)\b.*\b(?:vino|vinieron|ent
 
 def handle(n: str, respond) -> bool:
     """n: minúsculas sin tildes."""
+    if pide_foto(n):  # por voz: "Jarvis, mandame una foto del cuarto" -> al celular
+        respond(_sir("Tomando la foto"))
+        ok, error = mandar_foto()
+        respond(_sir("Se la mandé al celular") if ok else _sir(f"No pude mandarle la foto: {error}"))
+        return True
     if re.search(_VISITAS, n) and not re.search(_VIGILA, n):
         hoy = re.search(r"\bhoy\b", n)
         respond(resumen_visitas(desde=datetime.datetime.combine(datetime.date.today(), datetime.time()) if hoy else None))
