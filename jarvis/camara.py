@@ -40,7 +40,6 @@ FPS = 5
 # no cargar el CPU: YuNet/MediaPipe achican la imagen de todos modos.
 CAPTURA = (1280, 720)
 ANCHO, ALTO = 320, 180
-VENTANA = "Jarvis - camara"
 # conexiones de los 21 puntos de la mano de MediaPipe (para dibujar el esqueleto)
 MANO = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (5, 9), (9, 10), (10, 11), (11, 12),
         (9, 13), (13, 14), (14, 15), (15, 16), (13, 17), (17, 18), (18, 19), (19, 20), (0, 17)]
@@ -119,6 +118,80 @@ def vista_previa(cv2, small, cara, n: int, meta: int, guardo: bool):
     msg = "Sin cara a la vista: mire a la cámara" if cara is None else "Mueva un poco la cabeza"
     t.append(msg + " · Esc para cerrar", style="dim")
     return t
+
+
+class Visor:
+    """La ventana de la camara en otro proceso (camara_ventana.py): si Qt se
+    cuelga ahi, la camara sigue. Los cuadros se mandan SIN bloquear: si el
+    visor va atrasado se descartan, y si no recibe nada en VISOR_COLGADO_S se
+    da por colgado, se mata y la camara sigue sin ventana."""
+
+    VISOR_COLGADO_S = 10.0
+    ANCHO_VISTA = 960  # la ventana es de 960x540: se manda ya achicado
+
+    def __init__(self):
+        self._proc = None
+        self._pendiente = b""
+        self._atascado_desde = 0.0
+        self.cerrada_por_usuario = False
+
+    def enviar(self, cv2, img) -> bool:
+        """False si el visor ya no sirve (colgado, o el usuario cerro la ventana)."""
+        import struct
+        import subprocess
+        import sys
+
+        if self._proc is not None and self._proc.poll() is not None:
+            from .camara_ventana import CERRADA_POR_USUARIO
+            self.cerrada_por_usuario = self._proc.returncode == CERRADA_POR_USUARIO
+            if not self.cerrada_por_usuario:
+                log.warning("camara: el visor se cerro (codigo %s)", self._proc.returncode)
+            self._proc = None
+            return False
+        if self._proc is None:
+            self._proc = subprocess.Popen([sys.executable, "-m", "jarvis.camara_ventana"], stdin=subprocess.PIPE,
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                          cwd=str(DATOS), start_new_session=True)
+            os.set_blocking(self._proc.stdin.fileno(), False)
+            self._pendiente, self._atascado_desde = b"", 0.0
+        fd = self._proc.stdin.fileno()
+        if not self._pendiente:  # el cuadro anterior ya salio entero: va el nuevo
+            h, w = img.shape[:2]
+            chico = cv2.resize(img, (self.ANCHO_VISTA, self.ANCHO_VISTA * h // w), interpolation=cv2.INTER_AREA)
+            ok, jpg = cv2.imencode(".jpg", chico, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if not ok:
+                return True
+            self._pendiente = struct.pack(">I", len(jpg)) + jpg.tobytes()
+        try:
+            n = os.write(fd, self._pendiente)
+            self._pendiente = self._pendiente[n:]
+        except BlockingIOError:
+            pass  # el visor no esta leyendo: se reintenta en el siguiente cuadro
+        except (BrokenPipeError, OSError):
+            self.cerrar()
+            return False
+        if self._pendiente:
+            self._atascado_desde = self._atascado_desde or time.time()
+            if time.time() - self._atascado_desde > self.VISOR_COLGADO_S:
+                log.warning("camara: el visor no responde (¿Qt colgado?); sigo sin ventana")
+                self.cerrar()
+                return False
+        else:
+            self._atascado_desde = 0.0
+        return True
+
+    def cerrar(self):
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=1)
+        except Exception:
+            proc.kill()
 
 
 class Camara:
@@ -280,6 +353,7 @@ class Camara:
         vista = {"mano": None, "mano_t": 0.0, "gesto": None, "score": 0.0, "disparo": None, "disparo_t": 0.0,
                  "persona": None, "nombre": None}
         abierta = False  # la ventana ya se mostro
+        visor = Visor()  # la ventana va en otro proceso (ver camara_ventana.py)
         try:
             while not self._stop.is_set():
                 t0 = time.time()
@@ -378,9 +452,9 @@ class Camara:
                     disparado = None
 
                 if self.ventana:
-                    abierta = self._mostrar(frame, caras, vista, ahora, abierta)
+                    abierta = self._mostrar(frame, caras, vista, ahora, visor)
                 elif abierta:
-                    cv2.destroyWindow(VENTANA)
+                    visor.cerrar()
                     abierta = False
 
                 fps = FPS if ahora - ultimo_mov < REPOSO_TRAS_S or self._aprendiendo is not None else FPS_REPOSO
@@ -390,31 +464,16 @@ class Camara:
             log.exception("camara: hilo")
         finally:
             cap.release()
-            if abierta:
-                try:
-                    cv2.destroyWindow(VENTANA)
-                    cv2.waitKey(1)
-                except Exception:
-                    pass
+            visor.cerrar()
 
     # ---------------------------------------------------------- ventana --
-    def _mostrar(self, frame, caras, vista: dict, ahora: float, abierta: bool) -> bool:
+    def _mostrar(self, frame, caras, vista: dict, ahora: float, visor: Visor) -> bool:
         """Dibuja lo que Jarvis ve (caras, cuerpo, esqueleto de la mano, gesto)
-        sobre el cuadro de 720p y lo muestra. Devuelve si la ventana sigue abierta.
-        Si el usuario la cierra con la X, no se vuelve a abrir hasta pedirlo."""
+        sobre el cuadro de 720p y se lo manda al visor (otro proceso). Devuelve
+        si la ventana sigue abierta. Si el usuario la cierra con la X, o el
+        visor se cuelga, no se vuelve a abrir hasta pedirlo."""
         cv2 = self._cv2
         try:
-            if not abierta:
-                # Qt de OpenCV via XWayland, con las fuentes del sistema y sin avisos:
-                # Qt escribe directo a la terminal y ensuciaba la interfaz de Jarvis
-                os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
-                os.environ.setdefault("QT_QPA_FONTDIR", "/usr/share/fonts/truetype/dejavu")
-                os.environ.setdefault("QT_LOGGING_RULES", "*.debug=false;*.info=false;*.warning=false;default.warning=false")
-                cv2.namedWindow(VENTANA, cv2.WINDOW_NORMAL)
-                cv2.resizeWindow(VENTANA, 960, 540)
-            elif cv2.getWindowProperty(VENTANA, cv2.WND_PROP_VISIBLE) < 1:
-                self.ventana = False  # la cerro con la X
-                return False
             img = frame.copy()
             h, w = img.shape[:2]
             sx, sy = w / ANCHO, h / ALTO
@@ -446,9 +505,10 @@ class Camara:
             if vista["disparo"] and ahora - vista["disparo_t"] < 1.5:
                 texto = {"palma": "PALMA: alto", "pulgar": "PULGAR: continuar", "victoria": "VICTORIA: siguiente"}.get(vista["disparo"], vista["disparo"])
                 cv2.putText(img, texto, (30, h - 40), cv2.FONT_HERSHEY_SIMPLEX, 1.6, verde, 4)
-            cv2.imshow(VENTANA, img)
-            cv2.waitKey(1)
-            return True
+            if visor.enviar(cv2, img):
+                return True
+            self.ventana = False
+            return False
         except Exception:
             log.exception("camara: ventana")
             self.ventana = False  # sin pantalla (o Qt fallo): seguir sin ventana
