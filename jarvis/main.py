@@ -602,13 +602,16 @@ class Session:
             if self._closed:
                 return
             self._closed = True
-        voice_output.stop()
-        if self.camara:
-            self.camara.stop()
-        audio_focus.restore_now()  # que la musica no quede atenuada
-        whatsapp.close()
-        llm.shutdown()
-        stt_gpu.shutdown()
+        # primero los servidores (lo mas pesado: si algo de abajo falla o tarda,
+        # que no queden huerfanos ocupando la RAM y la grafica), y cada paso
+        # por separado: una excepcion en uno no debe saltarse los demas
+        for paso in (llm.shutdown, stt_gpu.shutdown, voice_output.stop,
+                     audio_focus.restore_now,  # que la musica no quede atenuada
+                     lambda: self.camara and self.camara.stop(), whatsapp.close):
+            try:
+                paso()
+            except Exception as exc:
+                _log.warning(f"Al cerrar: {exc!r}")
 
 
 def main():
