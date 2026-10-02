@@ -52,7 +52,9 @@ AYUDA = (
     "• prende la tele / modo juego / pausa\n"
     "• activa la vigilancia / ¿quién vino?\n"
     "• recuérdame sacar la ropa en 40 minutos\n"
-    "• alarma a las 6 de la mañana"
+    "• alarma a las 6 de la mañana\n"
+    "• invita a mi papá / invitados / quita a mi papá\n"
+    "• dale permiso a mi papá 30 minutos / quítale el permiso a mi papá"
     "\n\nSi me manda una nota de voz, le contesto con voz."
 )
 
@@ -105,23 +107,44 @@ def _api(metodo: str, timeout: float = 20, **kwargs):
     return data["result"]
 
 
-def enviar(texto: str) -> bool:
-    """Manda un mensaje al dueño. False si no está configurado o falló (sin internet)."""
+def enviar(texto: str, chat_id: int | None = None, botones: list | None = None) -> bool:
+    """Manda un mensaje (al dueño si no se dice a quién). botones: filas de
+    (texto, dato) que vuelven como callback_query. False si falló."""
     if not configurado():
         return False
+    datos = {"chat_id": chat_id or _config()["chat_id"], "text": texto[:MAX_TEXTO]}
+    if botones:
+        datos["reply_markup"] = json.dumps({"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in fila]
+                                                                for fila in botones]})
     try:
-        _api("sendMessage", data={"chat_id": _config()["chat_id"], "text": texto[:MAX_TEXTO]})
+        _api("sendMessage", data=datos)
         return True
     except Exception as exc:
         log.warning(f"Telegram: no pude mandar el mensaje ({exc})")
         return False
 
 
-def enviar_foto(jpg: bytes, texto: str = "") -> bool:
+def editar(mensaje: dict, texto: str):
+    """Cambia el texto de un mensaje ya enviado (y le quita los botones)."""
+    try:
+        _api("editMessageText", data={"chat_id": mensaje["chat"]["id"], "message_id": mensaje["message_id"],
+                                      "text": texto[:MAX_TEXTO]})
+    except Exception as exc:
+        log.warning(f"Telegram: no pude editar el mensaje ({exc})")
+
+
+def responder_boton(callback_id: str, texto: str = ""):
+    try:
+        _api("answerCallbackQuery", data={"callback_query_id": callback_id, "text": texto})
+    except Exception:
+        pass
+
+
+def enviar_foto(jpg: bytes, texto: str = "", chat_id: int | None = None) -> bool:
     if not configurado():
         return False
     try:
-        _api("sendPhoto", timeout=60, data={"chat_id": _config()["chat_id"], "caption": texto[:1000]},
+        _api("sendPhoto", timeout=60, data={"chat_id": chat_id or _config()["chat_id"], "caption": texto[:1000]},
              files={"photo": ("camara.jpg", jpg, "image/jpeg")})
         return True
     except Exception as exc:
@@ -135,14 +158,16 @@ class _Accion:
     Sin esto parecia que no habia llegado el mensaje: la IA tarda segundos, y
     al arrancar Jarvis se calienta ~30 s."""
 
-    def __init__(self, accion: str = "typing"):
+    def __init__(self, accion: str = "typing", chat_id: int | None = None):
         self.accion = accion
+        self.chat_id = chat_id
         self._fin = threading.Event()
 
     def _run(self):
         while not self._fin.is_set():
             try:
-                _api("sendChatAction", timeout=10, data={"chat_id": _config()["chat_id"], "action": self.accion})
+                _api("sendChatAction", timeout=10,
+                     data={"chat_id": self.chat_id or _config()["chat_id"], "action": self.accion})
             except Exception:
                 pass
             self._fin.wait(4)
@@ -155,11 +180,11 @@ class _Accion:
         self._fin.set()
 
 
-def enviar_voz(ogg: bytes, texto: str = "") -> bool:
+def enviar_voz(ogg: bytes, texto: str = "", chat_id: int | None = None) -> bool:
     if not configurado():
         return False
     try:
-        _api("sendVoice", timeout=60, data={"chat_id": _config()["chat_id"], "caption": texto[:1000]},
+        _api("sendVoice", timeout=60, data={"chat_id": chat_id or _config()["chat_id"], "caption": texto[:1000]},
              files={"voice": ("jarvis.ogg", ogg, "audio/ogg")})
         return True
     except Exception as exc:
@@ -234,7 +259,7 @@ class Bot:
         espera = 2  # reintento tras un error: 2, 4, 8... hasta 30 s (antes 15 s fijos)
         while not self._stop.is_set():
             try:
-                params = {"timeout": POLL_S, "allowed_updates": json.dumps(["message"])}
+                params = {"timeout": POLL_S, "allowed_updates": json.dumps(["message", "callback_query"])}
                 if offset is not None:
                     params["offset"] = offset
                 updates = _api("getUpdates", timeout=POLL_S + 15, data=params)
@@ -244,13 +269,32 @@ class Bot:
                 self._stop.wait(espera)
                 espera = min(espera * 2, 30)
                 continue
+            from . import invitados
             for u in updates:
                 offset = u["update_id"] + 1
+                boton = u.get("callback_query")
+                if boton:  # el dueño contestó "¿le das permiso?" (invitados.py)
+                    if (boton.get("from") or {}).get("id") == dueno:
+                        threading.Thread(target=invitados.callback, daemon=True,
+                                         args=(boton.get("data"), boton["id"], boton.get("message") or {})).start()
+                    continue
                 msg = u.get("message") or {}
-                if (msg.get("chat") or {}).get("id") != dueno:
-                    continue  # otro chat: ni se contesta
+                chat = (msg.get("chat") or {}).get("id")
                 texto = (msg.get("text") or "").strip()
                 audio = msg.get("voice") or msg.get("audio")
+                if chat != dueno:
+                    if (msg.get("chat") or {}).get("type") != "private":
+                        continue  # grupos: nunca
+                    if invitados.es_invitado(chat):
+                        if texto or audio:
+                            threading.Thread(target=self._atender_invitado, daemon=True,
+                                             args=(chat, texto, audio["file_id"] if audio and not texto else None)).start()
+                    elif texto:  # desconocido: solo cuenta si manda el código de invitado (si no, ni se contesta)
+                        nombre_tg = " ".join(x for x in ((msg.get("from") or {}).get("first_name"),
+                                                         (msg.get("from") or {}).get("last_name")) if x)
+                        threading.Thread(target=invitados.registrar_si_codigo, args=(chat, texto, nombre_tg),
+                                         daemon=True).start()
+                    continue
                 # cuanto tardo en LLEGAR (Telegram da la hora de envio, al segundo)
                 retraso = time.time() - msg.get("date", time.time())
                 if retraso > 5:
@@ -260,15 +304,8 @@ class Bot:
                 elif audio:
                     threading.Thread(target=self._atender_audio, args=(audio["file_id"],), daemon=True).start()
 
-    def _atender_audio(self, file_id: str):
-        """Nota de voz: se transcribe y se contesta con otra nota de voz."""
-        if self._transcribir is None:
-            enviar("Por ahora solo entiendo texto, señor.")
-            return
-        with _Accion("record_voice"):
-            self._atender_audio_(file_id)
-
-    def _atender_audio_(self, file_id: str):
+    def _transcribir_nota(self, file_id: str, chat_id: int | None = None) -> str | None:
+        """Texto de una nota de voz, sin el "Jarvis," del principio. None si falló (ya avisó)."""
         try:
             x = audio_16k(_descargar(file_id))
             trozo = 16000 * TROZO_S
@@ -276,23 +313,56 @@ class Bot:
                                          for i in range(0, x.size, trozo)) if t).strip()
         except Exception as exc:
             log.exception("Telegram: no pude leer el audio")
-            enviar(f"No pude escuchar el audio, señor: {exc}")
+            enviar(f"No pude escuchar el audio, señor: {exc}", chat_id=chat_id)
+            return None
+        return re.sub(r"^\W*jarvis\W*", "", texto, flags=re.IGNORECASE).strip()  # "Jarvis, prende la tele"
+
+    def _atender_audio(self, file_id: str):
+        """Nota de voz: se transcribe y se contesta con otra nota de voz."""
+        if self._transcribir is None:
+            enviar("Por ahora solo entiendo texto, señor.")
             return
-        texto = re.sub(r"^\W*jarvis\W*", "", texto, flags=re.IGNORECASE).strip()  # "Jarvis, prende la tele"
+        with _Accion("record_voice"):
+            texto = self._transcribir_nota(file_id)
+        if texto is None:
+            return
         if not texto:
             self._contestar("No le entendí, señor. ¿Puede repetirlo?", por_voz=True)
             return
         self._atender(texto, por_voz=True)
 
-    def _contestar(self, texto: str, por_voz: bool, entendi: str = ""):
+    def _atender_invitado(self, chat_id: int, texto: str, file_id: str | None):
+        """Un invitado (invitados.py): mismas reglas en texto o en audio, con
+        muchas menos cosas permitidas que el dueño."""
+        from . import invitados
+        por_voz = file_id is not None
+        with _Accion("record_voice" if por_voz else "typing", chat_id=chat_id):
+            if por_voz:
+                if self._transcribir is None:
+                    enviar("Por ahora solo entiendo texto, señor.", chat_id=chat_id)
+                    return
+                texto = self._transcribir_nota(file_id, chat_id)
+                if not texto:
+                    if texto is not None:
+                        self._contestar("No le entendí, señor. ¿Puede repetirlo?", True, chat_id=chat_id)
+                    return
+            try:
+                resp = invitados.atender(chat_id, texto)
+            except Exception:
+                log.exception("Telegram: invitado")
+                resp = "Disculpe, señor, algo falló. Inténtelo de nuevo."
+            if resp:
+                self._contestar(resp, por_voz, texto if por_voz else "", chat_id=chat_id)
+
+    def _contestar(self, texto: str, por_voz: bool, entendi: str = "", chat_id: int | None = None):
         if por_voz and self._sintetizar is not None:
             try:
                 wav = self._sintetizar(para_decir(texto))
-                if wav and enviar_voz(nota_de_voz(wav), f"🎙 «{entendi}»" if entendi else ""):
+                if wav and enviar_voz(nota_de_voz(wav), f"🎙 «{entendi}»" if entendi else "", chat_id=chat_id):
                     return
             except Exception:
                 log.exception("Telegram: no pude armar la nota de voz")
-        enviar((f"🎙 «{entendi}»\n" if entendi else "") + texto)  # sin voz: al menos el texto
+        enviar((f"🎙 «{entendi}»\n" if entendi else "") + texto, chat_id=chat_id)  # sin voz: al menos el texto
 
     def _atender(self, texto: str, por_voz: bool = False):
         t0 = time.time()
@@ -309,6 +379,11 @@ class Bot:
         try:
             if texto.lower() in ("/start", "/ayuda", "/help", "ayuda"):
                 enviar(AYUDA)
+                return
+            from . import invitados
+            admin = invitados.comando_dueno(texto)
+            if admin:
+                enviar(admin)
                 return
             if re.search(r"\b(?:foto|fotito|fotografia|fotografía|imagen|captura|cuarto)\b", texto.lower()):
                 accion.accion = "upload_photo"
