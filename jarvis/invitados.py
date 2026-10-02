@@ -19,8 +19,15 @@ Lo que SÍ puede un invitado:
 Todo lo demás (tele, música, alarma, vigilancia, estado, recordatorios,
 memoria, WhatsApp, apps...) se le niega con amabilidad.
 
+Recados: "dile a Yair que...", "avísale a Yair...", "recado para Yair: ..." le
+llegan al dueño a su Telegram tal cual los escribió el invitado.
+
+Cada conversación (lo que manda el invitado y lo que Jarvis le contesta, texto,
+audio o foto) se guarda en logs/invitados/<chat>.log (logs/ no va a git).
+
 Comandos del dueño (por Telegram): "invita a mi papá", "invitados", "quita a
-mi papá", "dale permiso a mi papá 30 minutos", "quítale el permiso a mi papá"."""
+mi papá", "dale permiso a mi papá 30 minutos", "quítale el permiso a mi papá",
+"conversación de mi papá"."""
 
 import datetime
 import logging
@@ -44,6 +51,8 @@ MAX_MENSAJES_MIN = 8  # un invitado no puede mandar más que esto por minuto
 REPETIR_PEDIDO_S = 120  # tras un "no", el invitado no puede volver a pedir foto en este rato
 HISTORIAL = 8  # mensajes de la plática del invitado que recuerda la IA
 
+CONVERSACIONES = __import__("pathlib").Path(__file__).resolve().parent.parent / "logs" / "invitados"
+CONVERSACION_LINEAS = 30  # lo que manda "conversación de mi papá"
 _lock = threading.Lock()
 _codigo: dict = {}  # {"codigo", "nombre", "hasta", "intentos"}
 _pedidos: dict[int, float] = {}  # invitado -> cuando pidió foto (esperando al dueño)
@@ -64,6 +73,12 @@ _ACCION = (r"\b(?:prende|prendela|prendelo|enciende|apaga|apagala|apagalo|pon|po
            r"despiertame|recuerdame|avisame|acuerdate|anota|apunta|busca|borra|olvida|aprende|apagate|reinicia|"
            r"cambia|conecta|desconecta|activa|desactiva|alarma|temporizador|recordatorios?|vigila|vigilancia|"
            r"estado|estatus|status|reporte|quien vino|visitas|bateria|que recuerdas|que sabes de)\b")
+# recados para el dueño: "dile a Yair que...", "avisale que...", "recado para Yair"
+_RECADO = (r"^(?:oye |jarvis )?(?:dile|digale|dele|avisale|avisele|comentale|comentele|pasale|pasele|"
+           r"recuerdale|recuerdele|mandale|mandele|preguntale|preguntele)(?: (?:el|un|este) (?:recado|mensaje))?"
+           r" (?:a (?:yair|mi hijo|el|tu jefe|tu creador|tu dueno)\b|que\b|si\b)"
+           r"|\brecado\b|\bdejale (?:un )?(?:recado|mensaje)\b")
+
 # preguntas sobre el dueño: nunca a la IA (aunque no sepa nada, podria inventar)
 _PRIVADO = (r"\b(?:que (?:esta|anda|estuvo|hace) haciendo|que hace|donde (?:esta|anda|estuvo)|con quien|"
             r"esta (?:\w+ )?(?:en (?:la )?casa|ahi|dormido|despierto|solo)|a que hora (?:llego|salio|se durmio|se desperto)|"
@@ -92,6 +107,25 @@ def _dueno() -> str:
         return memory.get_name() or "Yair"
     except Exception:
         return "Yair"
+
+
+# ----------------------------------------------------------- conversación --
+def guardar_conversacion(chat_id: int, quien: str, texto: str):
+    """Una línea en logs/invitados/<chat>.log: fecha, quién y qué."""
+    try:
+        CONVERSACIONES.mkdir(parents=True, exist_ok=True)
+        linea = " ".join(texto.split())  # una sola línea aunque el mensaje tenga saltos
+        with open(CONVERSACIONES / f"{chat_id}.log", "a", encoding="utf-8") as f:
+            f.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S}  {quien}: {linea}\n")
+    except OSError:
+        log.exception("Invitados: no pude guardar la conversación")
+
+
+def _ultimas_lineas(chat_id: int, n: int) -> list[str]:
+    try:
+        return (CONVERSACIONES / f"{chat_id}.log").read_text(encoding="utf-8").splitlines()[-n:]
+    except OSError:
+        return []
 
 
 # ---------------------------------------------------------------- registro --
@@ -238,6 +272,17 @@ def comando_dueno(texto: str) -> str | None:
             lineas.append(f"• Tu {d['nombre']} ({d.get('telegram', '')}): "
                           + (f"puede ver la cámara {int(p // 60) + 1} min más" if p else "sin permiso de cámara"))
         return "Invitados:\n" + "\n".join(lineas)
+    if re.search(r"\b(?:conversacion|platica|chat|mensajes)\b.*\b(?:de|con)\b|"
+                 r"\bque (?:ha dicho|dijo|ha escrito|escribio|hablo|platico|ha hablado)\b", n):
+        objetivo = _buscar(n)
+        if not objetivo:
+            return None if not _invitados() else "¿De quién? Escribe «invitados» para ver la lista."
+        partes = []
+        for cid, d in objetivo:
+            lineas = _ultimas_lineas(int(cid), CONVERSACION_LINEAS)
+            partes.append(f"🗨 Conversación con tu {d['nombre']} (últimos {len(lineas)} mensajes):\n"
+                          + ("\n".join(l[11:] for l in lineas) if lineas else "(todavía no hay nada)"))
+        return "\n\n".join(partes)[-telegram.MAX_TEXTO:]
     m = re.search(r"\bcodigo\b.*?\b(\d{6})\b", n)
     if m and re.search(r"^(?:cambia|pon|nuevo|establece)\b", n):
         cfg = telegram._config()
@@ -409,6 +454,10 @@ def atender(chat_id: int, texto: str) -> str | None:
     ritmo.append(time.time())
     n = _norm(texto)
     log.info(f"Invitados: {nombre(chat_id)}: {texto!r}")
+    if re.search(_RECADO, n):
+        telegram.enviar(f"💬 Recado de tu {nombre(chat_id)}: «{texto.strip()}»")
+        log.info(f"Invitados: recado de {nombre(chat_id)} para el dueño")
+        return _sir(f"Ya se lo mandé a {_dueno()}")
     if n in ("start", "ayuda", "help", "que puedes hacer", "que haces", "que sabes hacer", "para que sirves"):
         return (f"Puedo platicar con usted, decirle la hora, la fecha o el clima, contarle un chiste, y mandarle una "
                 f"foto del cuarto si {_dueno()} lo autoriza (escriba «foto»). Lo demás de la casa solo lo maneja {_dueno()}.")

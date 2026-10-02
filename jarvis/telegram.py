@@ -55,7 +55,8 @@ AYUDA = (
     "• alarma a las 6 de la mañana\n"
     "• invita a mi papá / invitados / quita a mi papá\n"
     "• dale permiso a mi papá 30 minutos / quítale el permiso a mi papá\n"
-    "• cuál es el código / cambia el código a 123456 / desactiva el código / desbloquea"
+    "• cuál es el código / cambia el código a 123456 / desactiva el código / desbloquea\n"
+    "• conversación de mi papá (lo último que ha hablado con Jarvis)"
     "\n\nSi me manda una nota de voz, le contesto con voz."
 )
 
@@ -119,10 +120,23 @@ def enviar(texto: str, chat_id: int | None = None, botones: list | None = None) 
                                                                 for fila in botones]})
     try:
         _api("sendMessage", data=datos)
+        _a_invitado(chat_id, texto)
         return True
     except Exception as exc:
         log.warning(f"Telegram: no pude mandar el mensaje ({exc})")
         return False
+
+
+def _a_invitado(chat_id: int | None, texto: str):
+    """Lo que Jarvis le manda a un invitado queda en su conversación (invitados.py)."""
+    if not chat_id or chat_id == _config().get("chat_id"):
+        return
+    try:
+        from . import invitados
+        if invitados.es_invitado(chat_id):
+            invitados.guardar_conversacion(chat_id, "Jarvis", texto)
+    except Exception:
+        log.exception("Telegram: no pude guardar la conversación")
 
 
 def editar(mensaje: dict, texto: str):
@@ -147,6 +161,7 @@ def enviar_foto(jpg: bytes, texto: str = "", chat_id: int | None = None) -> bool
     try:
         _api("sendPhoto", timeout=60, data={"chat_id": chat_id or _config()["chat_id"], "caption": texto[:1000]},
              files={"photo": ("camara.jpg", jpg, "image/jpeg")})
+        _a_invitado(chat_id, f"[foto del cuarto] {texto}")
         return True
     except Exception as exc:
         log.warning(f"Telegram: no pude mandar la foto ({exc})")
@@ -347,6 +362,7 @@ class Bot:
                     if texto is not None:
                         self._contestar("No le entendí, señor. ¿Puede repetirlo?", True, chat_id=chat_id)
                     return
+            invitados.guardar_conversacion(chat_id, invitados.nombre(chat_id), ("[audio] " if por_voz else "") + texto)
             try:
                 resp = invitados.atender(chat_id, texto)
             except Exception:
@@ -360,6 +376,7 @@ class Bot:
             try:
                 wav = self._sintetizar(para_decir(texto))
                 if wav and enviar_voz(nota_de_voz(wav), f"🎙 «{entendi}»" if entendi else "", chat_id=chat_id):
+                    _a_invitado(chat_id, f"[audio] {texto}")
                     return
             except Exception:
                 log.exception("Telegram: no pude armar la nota de voz")
