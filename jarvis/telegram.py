@@ -103,6 +103,32 @@ def enviar_foto(jpg: bytes, texto: str = "") -> bool:
         return False
 
 
+class _Accion:
+    """"escribiendo...", "grabando audio...", "enviando foto..." en el chat
+    mientras Jarvis trabaja (Telegram lo borra a los ~5 s: se repite cada 4).
+    Sin esto parecia que no habia llegado el mensaje: la IA tarda segundos, y
+    al arrancar Jarvis se calienta ~30 s."""
+
+    def __init__(self, accion: str = "typing"):
+        self.accion = accion
+        self._fin = threading.Event()
+
+    def _run(self):
+        while not self._fin.is_set():
+            try:
+                _api("sendChatAction", timeout=10, data={"chat_id": _config()["chat_id"], "action": self.accion})
+            except Exception:
+                pass
+            self._fin.wait(4)
+
+    def __enter__(self):
+        threading.Thread(target=self._run, daemon=True).start()
+        return self
+
+    def __exit__(self, *exc):
+        self._fin.set()
+
+
 def enviar_voz(ogg: bytes, texto: str = "") -> bool:
     if not configurado():
         return False
@@ -206,6 +232,10 @@ class Bot:
         if self._transcribir is None:
             enviar("Por ahora solo entiendo texto, señor.")
             return
+        with _Accion("record_voice"):
+            self._atender_audio_(file_id)
+
+    def _atender_audio_(self, file_id: str):
         try:
             x = audio_16k(_descargar(file_id))
             trozo = 16000 * TROZO_S
@@ -232,6 +262,13 @@ class Bot:
         enviar((f"🎙 «{entendi}»\n" if entendi else "") + texto)  # sin voz: al menos el texto
 
     def _atender(self, texto: str, por_voz: bool = False):
+        t0 = time.time()
+        accion = _Accion("record_voice" if por_voz else "typing")
+        with accion:
+            self._atender_(texto, por_voz, accion)
+        log.info(f"Telegram: contesté «{texto[:40]}» en {time.time() - t0:.1f} s")
+
+    def _atender_(self, texto: str, por_voz: bool, accion: _Accion):
         log.info(f"Telegram{' (audio)' if por_voz else ''}: {texto!r}")
         if self._hud:
             self._hud.log(f"📱 Telegram{' 🎙' if por_voz else ''}: {texto}")
@@ -240,6 +277,8 @@ class Bot:
             if texto.lower() in ("/start", "/ayuda", "/help", "ayuda"):
                 enviar(AYUDA)
                 return
+            if re.search(r"\b(?:foto|fotito|fotografia|fotografía|imagen|captura|cuarto)\b", texto.lower()):
+                accion.accion = "upload_photo"
             especial = self._especiales(texto)
             if especial is not None:
                 if especial.get("foto"):

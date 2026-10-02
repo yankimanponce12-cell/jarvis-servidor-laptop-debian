@@ -425,7 +425,9 @@ class Session:
         """"estado" / "¿está todo bien en casa?" y "foto": no pasan por commands.py.
         Devuelve {"texto": ..., "foto": jpg} o None."""
         n = interrupt.normalize(text)
-        if re.search(r"^/?estado$|\b(?:todo bien|todo en orden|como esta la casa|como va la casa|que hay de nuevo)\b", n):
+        if re.search(r"^/?(?:estado|estatus|status|reporte|informe)$|\b(?:todo bien|todo en orden|como esta la casa|"
+                     r"como va la casa|que hay de nuevo|como esta todo|como va todo|estado de la casa|reporte de la casa|"
+                     r"estatus de la casa|novedades)\b", n):
             return {"texto": avisos.estado_casa()}
         if vigilancia.pide_foto(n):
             jpg, error = vigilancia.foto_del_cuarto()
