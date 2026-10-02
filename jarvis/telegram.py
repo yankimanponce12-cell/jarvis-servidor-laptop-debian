@@ -45,20 +45,69 @@ TROZO_S = 14  # whisper-server procesa ventanas de 15 s (stt_gpu.AUDIO_CTX)
 POLL_S = 10
 MAX_TEXTO = 4000  # Telegram corta en 4096
 
-AYUDA = (
-    "Soy Jarvis. Escríbame como me habla en casa:\n"
-    "• estado — cómo está la casa\n"
-    "• foto — lo que ve la cámara\n"
-    "• prende la tele / modo juego / pausa\n"
-    "• activa la vigilancia / ¿quién vino?\n"
-    "• recuérdame sacar la ropa en 40 minutos\n"
-    "• alarma a las 6 de la mañana\n"
-    "• invita a mi papá / invitados / quita a mi papá\n"
-    "• dale permiso a mi papá 30 minutos / quítale el permiso a mi papá\n"
+# "ayuda" del dueño: TODOS los comandos (se manda en varios mensajes: Telegram corta en 4096)
+AYUDA = [
+    "🤖 COMANDOS DE JARVIS\n"
+    "Escríbeme o mándame un audio igual que me hablas en casa. Texto → te contesto con texto; audio → con voz.\n\n"
+    "🏠 CASA Y CÁMARA\n"
+    "• estado / estatus / ¿está todo bien en casa? — resumen de todo\n"
+    "• foto / foto del cuarto — lo que ve la cámara\n"
+    "• activa la vigilancia / desactiva la vigilancia — foto al celular si entra alguien que no eres tú\n"
+    "• ¿quién vino mientras no estaba? / ¿alguien entró hoy?\n"
+    "• prende la cámara / apaga la cámara / cómo está la cámara\n"
+    "• muestra la cámara / oculta la cámara — el panel en la pantalla de Jarvis\n"
+    "• aprende mi cara / olvida mi cara\n\n"
+    "⏰ ALARMA, RECORDATORIOS Y TEMPORIZADORES\n"
+    "• alarma a las 6 de la mañana / despiértame en 20 minutos\n"
+    "• ¿a qué hora está la alarma? / cancela la alarma\n"
+    "• al sonar se apaga con: ✋ palma, «ya me desperté», «apágala» o «pausa»\n"
+    "• recuérdame sacar la ropa en 40 minutos / recuérdame a las 5 llamar a mi mamá\n"
+    "• pon un temporizador de 10 minutos / ¿cuánto le falta al temporizador?\n"
+    "• ¿qué recordatorios tengo? / cancela el temporizador / cancela el recordatorio de la ropa",
+
+    "📺 TELE Y PS5\n"
+    "• prende la tele / apaga la tele / ¿está prendida la tele?\n"
+    "• modo juego / quita el modo juego — tele + PS5\n"
+    "• pon la play / pon la laptop / pon el hdmi — cambia la entrada\n"
+    "• pon Netflix en la tele (YouTube, Prime, Disney, Max, Twitch, Plex, Spotify)\n"
+    "• sube el volumen de la tele 5 / baja el volumen de la tele / silencia la tele\n"
+    "• pausa la tele / dale play a la tele\n"
+    "• pon spotify en la tele y reproduce acdc / modo música / quita el modo música\n"
+    "• ¿cuánto llevo jugando?\n\n"
+    "🎵 MÚSICA\n"
+    "• abre spotify y pon canciones de rock / pon canciones de acdc / pon salsa / pon thunderstruck\n"
+    "• pausa / silencio / para la música — continúa / dale play\n"
+    "• siguiente canción / pon otra / ¿qué está sonando?\n"
+    "• cierra spotify / menea tu chapa\n"
+    "• pon música de X en YouTube / busca X en Google\n\n"
+    "💻 LAPTOP\n"
+    "• sube el volumen / pon el volumen al 50 / ¿qué volumen tengo? / silencia\n"
+    "• sube el brillo / pon el brillo al 50\n"
+    "• prende/apaga el wifi / ¿cómo está el wifi? / ¿qué redes wifi hay?\n"
+    "• prende/apaga el bluetooth / escanea dispositivos bluetooth / conecta con JBL / desconecta los audífonos\n"
+    "• ¿cuánta batería tengo? / ¿cómo está el sistema? / temperatura del procesador\n"
+    "• abre firefox / cierra la calculadora",
+
+    "💬 OTROS\n"
+    "• ¿qué hora es? / ¿qué día es?\n"
+    "• ¿qué clima hace? / clima de Mazatlán / ¿va a llover? / probabilidad de lluvia\n"
+    "• mándale un whatsapp a mamá que ya voy (el mensaje en la misma frase)\n"
+    "• me llamo X / acuérdate que… / ¿qué recuerdas de mí?\n"
+    "• cuéntame un chiste\n"
+    "• sin comentarios / vuelve a comentar — mis comentarios de desvelo y PS5\n"
+    "• cualquier otra cosa: platicamos\n\n"
+    "👨 INVITADOS (tu papá)\n"
+    "• invitados — quién tiene acceso\n"
+    "• conversación de mi papá — lo último que ha hablado con Jarvis\n"
+    "• dale permiso a mi papá 30 minutos / quítale el permiso a mi papá — la cámara\n"
+    "• quita a mi papá — le cierra el acceso\n"
     "• cuál es el código / cambia el código a 123456 / desactiva el código / desbloquea\n"
-    "• conversación de mi papá (lo último que ha hablado con Jarvis)"
-    "\n\nSi me manda una nota de voz, le contesto con voz."
-)
+    "• invita a mi mamá — código de un solo uso para alguien más\n"
+    "• sus recados («dile a Yair que…») te llegan solos, igual que la copia de cada foto que vea\n\n"
+    "🔔 TE AVISO SOLO\n"
+    "• alguien entró (con vigilancia), la alarma no se apagó, batería baja, tus recordatorios\n"
+    "• tu papá pidió la cámara (con botones ✅/❌), entró alguien con el código, intentos fallidos",
+]
 
 
 def _config() -> dict:
@@ -395,8 +444,10 @@ class Bot:
             self._hud.log(f"📱 Telegram{' 🎙' if por_voz else ''}: {texto}")
         entendi = texto if por_voz else ""
         try:
-            if texto.lower() in ("/start", "/ayuda", "/help", "ayuda"):
-                enviar(AYUDA)
+            if re.sub(r"[^\w ]", "", texto.lower().translate(str.maketrans("áéíóú", "aeiou"))).strip() in ("start", "ayuda", "help", "comandos", "lista de comandos",
+                                                              "que puedes hacer", "que puedo hacer"):
+                for parte in AYUDA:
+                    enviar(parte)
                 return
             from . import invitados
             admin = invitados.comando_dueno(texto)
