@@ -38,7 +38,11 @@ API = "https://api.telegram.org/bot{token}/{metodo}"
 ARCHIVOS = "https://api.telegram.org/file/bot{token}/{ruta}"
 MAX_AUDIO_S = 120  # notas de voz mas largas se cortan (Whisper va en pedazos de TROZO_S)
 TROZO_S = 14  # whisper-server procesa ventanas de 15 s (stt_gpu.AUDIO_CTX)
-POLL_S = 50  # long polling: Telegram contesta en cuanto llega un mensaje
+# long polling: Telegram deberia contestar en cuanto llega un mensaje, pero el
+# 2026-10-02 los mensajes llegaban hasta 55 s tarde y juntos, justo al vencer la
+# espera (por IPv6, en esta red una conexion quieta deja de recibir el aviso).
+# Por eso: IPv4 (_SesionIPv4) y esperas cortas, que acotan cualquier retraso.
+POLL_S = 10
 MAX_TEXTO = 4000  # Telegram corta en 4096
 
 AYUDA = (
@@ -70,9 +74,31 @@ def configurado() -> bool:
     return bool(cfg.get("token") and cfg.get("chat_id"))
 
 
+class _IPv4(requests.adapters.HTTPAdapter):
+    """Conexiones solo por IPv4: con origen 0.0.0.0, las direcciones IPv6 de
+    Telegram fallan al instante y urllib3 pasa a la IPv4."""
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["source_address"] = ("0.0.0.0", 0)
+        super().init_poolmanager(*args, **kwargs)
+
+
+def _nueva_sesion() -> requests.Session:
+    s = requests.Session()
+    s.mount("https://", _IPv4())
+    return s
+
+
+# una para la espera de mensajes y otra para todo lo demas (mandar respuestas,
+# fotos, "escribiendo..."): reusan la conexion en vez de abrir una cada vez
+_sesion_espera = _nueva_sesion()
+_sesion = _nueva_sesion()
+
+
 def _api(metodo: str, timeout: float = 20, **kwargs):
     cfg = _config()
-    r = requests.post(API.format(token=cfg["token"], metodo=metodo), timeout=timeout, **kwargs)
+    sesion = _sesion_espera if metodo == "getUpdates" else _sesion
+    r = sesion.post(API.format(token=cfg["token"], metodo=metodo), timeout=timeout, **kwargs)
     data = r.json()
     if not data.get("ok"):
         raise RuntimeError(data.get("description") or f"HTTP {r.status_code}")
