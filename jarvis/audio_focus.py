@@ -21,6 +21,7 @@ logs/audio_focus.json, asi un cierre brusco de Jarvis tampoco deja la musica
 baja. Como red de seguridad, si nadie vuelve a pedir atenuar en MAX_DUCK_S, se
 restaura solo."""
 
+import contextlib
 import json
 import re
 import subprocess
@@ -43,6 +44,7 @@ _holders = 0
 _saved: dict[str, list[int]] = {}  # aplicacion -> volumen original por canal
 _gen = 0  # cambia con cada duck/release: un fundido de subida viejo se cancela solo
 _last_duck = 0.0
+_sin_atenuar = 0  # > 0: duck() no baja nada (ver sin_atenuar)
 _watchdog: threading.Thread | None = None
 STATE_FILE = Path(__file__).resolve().parent.parent / "logs" / "audio_focus.json"
 
@@ -122,6 +124,20 @@ def is_ducked() -> bool:
     return bool(_saved)
 
 
+@contextlib.contextmanager
+def sin_atenuar():
+    """Mientras dure, Jarvis habla SIN bajar la musica (la alarma: AC/DC a todo
+    volumen con los buenos dias encima, como en Iron Man)."""
+    global _sin_atenuar
+    with _lock:
+        _sin_atenuar += 1
+    try:
+        yield
+    finally:
+        with _lock:
+            _sin_atenuar -= 1
+
+
 def duck():
     """Atenua lo que este sonando (y lo que empiece a sonar despues, en la
     siguiente llamada). Cada duck() necesita su release()."""
@@ -131,6 +147,8 @@ def duck():
         _gen += 1
         _last_duck = time.monotonic()
         _start_watchdog()
+        if _sin_atenuar:
+            return
         streams = [s for s in _streams() if not s[1]]
         if not streams:
             return

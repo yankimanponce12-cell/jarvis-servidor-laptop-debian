@@ -58,3 +58,6 @@ Thumbs.db
 
 # --- voces de Piper (se descargan aparte, ver README) ---
 voces/
+camara_caras.json
+camara_config.json
+alarma.json

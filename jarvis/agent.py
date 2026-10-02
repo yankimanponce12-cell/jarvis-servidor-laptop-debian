@@ -189,6 +189,104 @@ def _parrots(sentence: str, heard: str) -> bool:
                for part in [heard, *llm.split_sentences(heard)])
 
 
+# ---- pulir la charla ----------------------------------------------------------
+# Qwen3 1.7B ignora parte del prompt (tutea, cierra con "¿Que quieres hacer?",
+# recita sus instrucciones). Cambiar el prompt o darle ejemplos de charla bajo
+# los aciertos de herramientas de 16/18 a 10/18 (2026-10-02), asi que se pule
+# la salida frase por frase, que no toca la decision de herramientas.
+_TU_A_USTED = [
+    # primero: "te sientas" -> "se sienta" (reflexivo con verbo en 2a persona)
+    (r"\b([Tt])e (\w+)as\b", lambda m: f"{'S' if m.group(1) == 'T' else 's'}e {m.group(2)}a"),
+    (r"\b([Tt])e (\w+)es\b", lambda m: f"{'S' if m.group(1) == 'T' else 's'}e {m.group(2)}e"),
+    (r"(?i)\b(quier|pued|tien|sient|prefier|piens|deb|sab|hac|cre|duerm|vuelv|pierd|entiend|recuerd|vien|sal|com|le|corr|vend|escrib|viv|decid|recib|abr)es\b", r"\1e"),
+    # subjuntivo: "puedas" -> "pueda", "tengas" -> "tenga"
+    (r"(?i)\b(pued|teng|quier|sient|duerm|hag|sep|vay|pierd|entiend|veng|dig|pong|salg|sigu|consig)as\b", r"\1a"),
+    (r"(?i)\b(necesit|gust|acuest|descans|preocup|ayud|dese|llam|trabaj|jueg|pas|cans|olvid|import|tom|busc|pregunt|habl|"
+     r"esper|mir|escuch|lleg|encuentr|cuent|ceb|anim|aburr|enoj|quej|gan|relaj|levant|qued|termin|empiez|organiz|tard)as\b", r"\1a"),
+    (r"\bestás\b", "está"), (r"(?i)\b(e)res\b", lambda m: "Es" if m.group(1) == "E" else "es"), (r"\bestas\b(?= \w+(?:do|da|ndo)\b)", "está"),
+    (r"\b[Tt]e gustar[ií]a\b", "le gustaría"),
+    # preterito: "perdiste" -> "perdio", "jugaste" -> "jugo" (irregulares comunes aparte)
+    (r"\b(dij|hic|pud|tuv|vin|quis|estuv|anduv|sup|pus)iste\b",
+     lambda m: {"dij": "dijo", "hic": "hizo", "pud": "pudo", "tuv": "tuvo", "vin": "vino", "quis": "quiso",
+                "estuv": "estuvo", "anduv": "anduvo", "sup": "supo", "pus": "puso"}[m.group(1)]),
+    # -iste/-aste solo en verbos conocidos: a ciegas rompia "existe", "triste", "contraste"
+    (r"\bfuiste\b", "fue"), (r"\bviste\b", "vio"),
+    (r"(?i)\b(?!contr|desg)(\w{2,})aste\b", r"\1ó"),
+    (r"(?i)\b(perd|com|sal|viv|escrib|conoc|aprend|venc|recib|decid|abr|sent|beb|corr|vend|pid|dorm|sub|elig|"
+     r"consegu|segu|cre|le|o|pens|pod|met|romp|respond|entend|devolv|volv|mov|sufr|ofrec|merec|crec)iste\b", r"\1ió"),
+    # reflexivos ("distraerte" -> "distraerse"); el resto es objeto ("ayudarte" -> "ayudarle")
+    (r"\b(distraer|relajar|acostar|dormir|levantar|sentir|preocupar|cuidar|divertir|quedar|ir|animar)te\b", r"\1se"),
+    (r"\b(\w+)(ar|er|ir)te\b", r"\1\2le"),
+    (r"\bcontigo\b", "con usted"), (r"\b(para|a|de|con) ti\b", r"\1 usted"),
+    (r"\btú\b", "usted"), (r"\btus\b", "sus"), (r"\btu\b", "su"), (r"\bte\b", "le"),
+    (r"\bTú\b", "Usted"), (r"\bTus\b", "Sus"), (r"\bTu\b", "Su"), (r"\bTe\b", "Le"),
+]
+# frases que ofrecen ayuda o abren otra pregunta "de servicio al cliente"
+_OFRECE = re.compile(
+    r"(?:puedo|podr[ií]a|pueda) (?:ayudar|hacer|servir)|estoy aqu[ií] para|"
+    r"^¿\s*(?:qu[eé] (?:quiere|desea|necesita|piensa|planea|tipo de (?:ayuda|cosa))|quiere|desea|necesita)\b|"
+    r"^¿.*\bayudar(?:le|lo)?\b|"
+    r"\bayuda necesita\b|"
+    r"no dude en|algo m[aá]s|en qu[eé] (?:puedo|le)|le gustar[ií]a|qu[eé] (?:quiere|desea|le gustar[ií]a) (?:que|hacer)|"
+    r"\bquiere que\b|tiene alguna (?:pregunta|duda)|hay algo", re.IGNORECASE)
+# el modelo a veces recita el prompt ("¿quien eres?")
+_RECITA = re.compile(r"herramienta|hablas de usted|le dices 'se|1-2 oraciones|sin markdown|"
+                     r":\s*formal, ingenioso", re.IGNORECASE)
+
+
+def _pulir(frase: str, ya_dijo_senor: bool) -> str:
+    """Frase lista para decir, o '' si hay que callarla."""
+    if _RECITA.search(frase):
+        corta = re.split(r":\s*formal|, el asistente de voz", frase)[0].strip(" ,:")
+        return corta + "." if corta and corta != frase else ""
+    for patron, cambio in _TU_A_USTED:
+        frase = re.sub(patron, cambio, frase)
+    if _OFRECE.search(frase):
+        return ""
+    if ya_dijo_senor:  # "señor" una vez por respuesta (al usuario le gusta, pero no en cada frase)
+        frase = re.sub(r",?\s*señor\b", "", frase, flags=re.IGNORECASE)
+        frase = re.sub(r"\s+([.!?])", r"\1", frase).strip()
+    return frase
+
+
+# "si pudieras hablar de mi, ¿que me dirias?" -> Qwen3 1.7B contestaba sobre
+# SI MISMO ("Soy un asistente de voz...") en 4 de 8 frases asi, y una nota en el
+# turno no alcanzo (2026-10-02). Las preguntas sobre el usuario van por una
+# llamada propia SIN herramientas, donde si se pueden dar ejemplos.
+# "mí" con acento es el usuario; "mi" sin acento es algo suyo ("a mi mamá" es WhatsApp)
+_SOBRE_MI = re.compile(r"\b(?:de|sobre|acerca de|para) mí\b(?! \w+ (?:que|a)\b)")
+_SOBRE_USUARIO = re.compile(
+    r"\bdescribeme\b|\bcomo me (?:ves|describirias|definirias)\b|\bque me dirias\b|"
+    r"^(?:jarvis )?(?:(?:tu )?crees que |dime si )?soy\b|\bcomo soy\b")
+SOBRE_USUARIO_PROMPT = (
+    "Tu nombre es Jarvis, el mayordomo digital del usuario, como el JARVIS de Iron Man: elegante, "
+    "ingenioso, con humor seco y cariño. Le hablas de usted y le dices 'señor'. El usuario te pregunta "
+    "algo SOBRE ÉL MISMO: contesta en una o dos oraciones hablando de ÉL (usted es..., usted tiene...), "
+    "nunca de ti ni de lo que tú haces. Sin preguntas y sin ofrecer ayuda. No inventes su edad, su "
+    "aspecto ni datos que no sabes: habla de su forma de ser.\n"
+    "Lo que se nota de él: él mismo te construyó y te programa, juega en su PS5, se despierta con AC/DC "
+    "y trasnocha seguido. {memoria}"
+)
+_SOBRE_USUARIO_EJEMPLOS = [
+    {"role": "user", "content": "¿crees que soy inteligente?"},
+    {"role": "assistant", "content": "Usted me programó a mí, señor; creo que eso responde la pregunta."},
+    {"role": "user", "content": "¿qué opinas de mi gusto musical?"},
+    {"role": "assistant", "content": "AC/DC a primera hora, señor. Impecable, aunque dudo que los vecinos opinen lo mismo."},
+]
+
+
+def _sobre_usuario_system() -> str:
+    datos = memory.get_core_memory_text()
+    return SOBRE_USUARIO_PROMPT.format(memoria=f"Lo que te ha contado:\n{datos}" if datos else "")
+
+
+def pregunta_sobre_usuario(text: str) -> bool:
+    t = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", text.lower())).strip()
+    if re.search(r"\b(?:whatsapp|mensaje|manda|mandale|escribele|llama|youtube|pon|ponme|abre|cierra)\b", t.translate(_ACCENTS)):
+        return False  # acciones, aunque digan "mí"
+    return bool(_SOBRE_MI.search(t) or _SOBRE_USUARIO.search(t.translate(_ACCENTS)))
+
+
 class _Emitter:
     """Filtra y entrega las frases de la respuesta. Con una interfaz que
     acepta respond(..., append=True) (la TUI de main.py) dice cada frase
@@ -207,6 +305,9 @@ class _Emitter:
 
     def __call__(self, sentence: str):
         if _parrots(sentence, self._heard):
+            return
+        sentence = _pulir(sentence, any("señor" in s.lower() for s in self.said))
+        if not sentence.strip(" .,!?¿¡"):
             return
         self.said.append(sentence)
         if self._stream:
@@ -230,7 +331,8 @@ class _Emitter:
             self._respond(self.text)
 
 
-_NO_PARROT = "No repitas lo que dijo el usuario: contesta con tus propias palabras."
+_NO_PARROT = ("No repitas lo que dijo el usuario: contesta con tus propias palabras, de usted, con un "
+              "comentario propio; sin preguntas y sin ofrecer ayuda.")
 
 
 def _chat(messages, emit: _Emitter, tools=None):
@@ -367,6 +469,18 @@ class Agent:
         cae a una respuesta generica, igual que hacia brain.ask()."""
         self.messages.append({"role": "user", "content": text})
         emit = _Emitter(respond, text)
+        if pregunta_sobre_usuario(text):
+            try:
+                full = [{"role": "system", "content": _sobre_usuario_system()}] + _SOBRE_USUARIO_EJEMPLOS + self._plain_history()
+                emit.feed(llm.chat(full, max_tokens=90, slot=llm.SLOT_LONG).get("content") or "", n=2)
+            except Exception:
+                self.messages.pop()
+                respond(_sir("No pude conectarme con mi modelo de IA local. Revise que llama.cpp esté corriendo"))
+                return
+            emit.finish(_sir("Usted es todo un caso"))
+            self.messages.append({"role": "assistant", "content": emit.text})
+            self._trim_history()
+            return
         if wants_long_answer(text):
             try:
                 _converse(self._plain_history(), emit)

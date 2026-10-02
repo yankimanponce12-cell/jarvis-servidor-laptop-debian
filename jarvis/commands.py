@@ -1,7 +1,8 @@
 import datetime
+import random
 import re
 
-from . import actions, agent, brain, chistes, demo, interrupt, memory, music, system, tv, weather, whatsapp
+from . import actions, agent, alarma, brain, camara, chistes, demo, interrupt, memory, music, system, tv, weather, whatsapp
 
 EXIT_WORDS = [
     "adios", "adios jarvis", "hasta luego", "cierra jarvis",
@@ -128,6 +129,47 @@ def _extract_message_contact(t: str):
     return _clean(m.group(1)) if m else None
 
 
+_RECHAZO = re.compile(
+    r"\bno (?:quiero|necesito|deseo) (?:\w+ )?nada\b|\bnada mas\b|\beso es todo\b|"
+    r"\b(?:dejalo|olvidalo|olvidate)\b|\bno,? gracias\b|\basi (?:esta|estoy) bien\b")
+
+
+def _es_rechazo(t: str) -> bool:
+    """El usuario dice que no quiere nada (en general, contestando una pregunta)."""
+    t = re.sub(r"^jarvis\W*", "", re.sub(r"[^\w\s]", " ", t)).strip()
+    t = re.sub(r"\s+", " ", t)
+    if not t or len(t.split()) > 8:
+        return False
+    return bool(re.fullmatch(r"(?:(?:no|nel|nop|nada|ninguna|ninguno|gracias)\s*)+", t) or _RECHAZO.search(t))
+
+
+def _charla_rapida(t: str) -> str | None:
+    """Saludos, gracias y despedidas: la IA chica los contestaba mal ("No tengo
+    que gracies", "buenos dias" -> "Entendido"), y asi salen al instante."""
+    t = re.sub(r"^jarvis\W*", "", re.sub(r"[^\w\s]", " ", t)).strip()
+    t = re.sub(r"\s+", " ", re.sub(r"\bjarvis\b", "", t)).strip()
+    if len(t.split()) > 6:
+        return None
+    hora = datetime.datetime.now().hour
+    if re.fullmatch(r"(?:muchas )?gracias(?: (?:por todo|amigo|carnal|compa))?|te lo agradezco|mil gracias|graciaas*", t):
+        return random.choice(["Para eso estoy, señor.", "Un placer, señor.", "Siempre a su servicio, señor.",
+                              "No hay de qué, señor."])
+    if re.fullmatch(r"(?:me voy a (?:dormir|acostar|la cama)|ya me (?:voy a dormir|duermo)|buenas noches|hasta manana)(?: jarvis)?", t):
+        return random.choice(["Que descanse, señor. Yo me quedo vigilando.", "Buenas noches, señor. Descanse.",
+                              "Que duerma bien, señor. Aquí estaré cuando despierte."])
+    if re.fullmatch(r"(?:hola|que onda|que tal|buenas|buenos dias|buenas tardes|hey|que hubo|quiubo)(?: (?:otra vez|de nuevo))?", t):
+        if 5 <= hora < 12:
+            opciones = ["Buenos días, señor. Listo para empezar el día.", "Buenos días, señor. Todo en orden por aquí."]
+        elif 12 <= hora < 20:
+            opciones = ["Buenas tardes, señor. Todo en orden por aquí.", "Buenas tardes, señor. Aquí estoy."]
+        elif hora >= 20:
+            opciones = ["Buenas noches, señor. Aquí estoy.", "Buenas noches, señor. Todo tranquilo por aquí."]
+        else:  # de madrugada
+            opciones = ["Buenas noches, señor. Trasnochando, por lo visto.", "Aquí estoy, señor. Aunque a estas horas debería estar dormido."]
+        return random.choice(opciones)
+    return None
+
+
 def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
     """Ejecuta el comando reconocido. respond() se usa para cada mensaje de
     salida (por defecto solo imprime; main.py le pasa una version que ademas
@@ -143,6 +185,17 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
         respond(_sir("No entendí nada, intente de nuevo"))
         return True
 
+    # "no", "nada", "no quiero escuchar nada"...: contestar corto y SIN pregunta.
+    # Si iba a la IA, contestaba con otra oferta/pregunta y se armaba un bucle.
+    if _es_rechazo(t):
+        respond(random.choice(["Como guste, señor.", "Entendido, señor.", "De acuerdo, señor. Aquí estaré."]))
+        return True
+
+    rapida = _charla_rapida(t)
+    if rapida:
+        respond(rapida)
+        return True
+
     if _matches_any(t, EXIT_WORDS):
         respond(_sir("Hasta luego"))
         return False
@@ -156,7 +209,9 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
     # las atiende antes para cortar a Jarvis si esta hablando; esto cubre lo
     # escrito y el celular)
     if interrupt.is_stop_command(t):
-        respond(_sir("Pausado") if system.pause_all() else _sir("No hay nada sonando"))
+        paused = system.pause_all()
+        alarma.detener()  # si sonaba la alarma, pausarla tambien la termina
+        respond(_sir("Pausado") if paused else _sir("No hay nada sonando"))
         return True
 
     if _matches_any(t, LIVE_DEMO_PHRASES):
@@ -182,9 +237,17 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
                 respond(_sir("No pude generar el código QR"))
         return True
 
+    # el despertador: "alarma a las 6 de la manana" (alarma.py)
+    if alarma.handle(t, respond):
+        return True
+
     # la tele de la sala y los modos musica/juego: antes que system, que si no
     # se quedaria con "sube el volumen de la tele" (volumen de la laptop)
     if tv.handle(t, respond):
+        return True
+
+    # la camara: apagar/prender, aprender la cara del usuario (camara.py)
+    if camara.handle(t, respond, hud):
         return True
 
     # controles del sistema (volumen exacto, brillo, wifi, bluetooth, bateria,

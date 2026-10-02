@@ -9,6 +9,7 @@ handle() es el punto de entrada de commands.py: recibe el texto normalizado
 (minusculas, sin tildes) y devuelve True si era una peticion de Spotify."""
 
 import json
+import random
 import os
 import re
 import shutil
@@ -397,9 +398,91 @@ def _open_uri(c: _Conn, uri: str, deadline: float) -> dict | None:
     return None
 
 
+# ------------------------------------------- Spotify de escritorio (tele) ----
+# Si la app de escritorio esta abierta (la de la tele, ver pantalla_tele.py),
+# las peticiones de musica suenan ahi: misma busqueda por Web API y la URI va
+# por MPRIS OpenUri. Se sabe que empezo a sonar cuando cambia la pista de MPRIS.
+DESKTOP_MPRIS = "org.mpris.MediaPlayer2.spotify"
+
+
+def desktop_running() -> bool:
+    return subprocess.run(["busctl", "--user", "status", DESKTOP_MPRIS], capture_output=True).returncode == 0
+
+
+def player() -> str:
+    """Nombre para `playerctl -p`: la app de escritorio si esta abierta, si no ncspot."""
+    return "spotify" if desktop_running() else "ncspot"
+
+
+def _desktop_state() -> tuple[str, str, dict]:
+    out = subprocess.run(
+        ["playerctl", "-p", "spotify", "metadata", "--format",
+         "{{status}}\t{{mpris:trackid}}\t{{title}}\t{{artist}}"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    status, trackid, title, artist = (out.split("\t") + ["", "", "", ""])[:4]
+    return status, trackid, {"title": title, "artists": [a.strip() for a in artist.split(",") if a.strip()]}
+
+
+def _desktop_open_uri(uri: str, deadline: float) -> dict | None:
+    """OpenUri en la app de escritorio y espera a que suene algo nuevo."""
+    _, before, _ = _desktop_state()
+    call = subprocess.run(
+        ["busctl", "--user", "call", DESKTOP_MPRIS, "/org/mpris/MediaPlayer2",
+         "org.mpris.MediaPlayer2.Player", "OpenUri", "s", uri],
+        capture_output=True,
+    )
+    if call.returncode != 0:
+        return None
+    end = min(time.time() + 6.0, deadline)
+    while time.time() < end:
+        time.sleep(0.3)
+        status, trackid, track = _desktop_state()
+        changed = trackid != before or uri.endswith(trackid.rsplit("/", 1)[-1])
+        if status == "Playing" and changed and track["title"]:
+            return track
+    # la app abrio la pagina (artista/lista) pero no arranco: play la arranca
+    subprocess.run(["playerctl", "-p", "spotify", "play"], capture_output=True)
+    time.sleep(1.5)
+    status, trackid, track = _desktop_state()
+    return track if status == "Playing" and trackid != before and track["title"] else None
+
+
+def _desktop_genre_candidates(query: str, genre_filter: str | None, deadline: float):
+    """La app de escritorio ignora OpenUri con listas (probado: sigue la cancion
+    anterior) y la API no deja leer las listas de Spotify con este client id.
+    Para un genero: una cancion al azar entre las mas populares; al terminar, la
+    reproduccion automatica de Spotify sigue con musica parecida."""
+    data = _api_get("search", {"q": genre_filter or query, "type": "track", "limit": 20, "market": "from_token"}, deadline)
+    tracks = _items(data, "tracks")
+    tracks.sort(key=lambda t: -(t.get("popularity") or 0))
+    top = tracks[:10]
+    random.shuffle(top)
+    for t in top[:3]:
+        yield t["uri"]
+
+
+def _desktop_play_query(query: str, is_genre: bool, genre_filter: str | None, timeout: float) -> dict | None:
+    deadline = time.time() + timeout
+    subprocess.run(["playerctl", "-p", "spotify", "shuffle", "Off"], capture_output=True)
+    uris = _desktop_genre_candidates(query, genre_filter, deadline) if is_genre else _candidates(query, False, None, deadline)
+    for uri in uris:
+        track = _desktop_open_uri(uri, deadline)
+        if track:
+            return track
+        if time.time() > deadline:
+            break
+    return None
+
+
 def play_query(query: str, is_genre: bool = False, genre_filter: str | None = None, timeout: float = 60.0) -> dict | None:
     """Busca `query` con una sola peticion a la Web API y reproduce el
-    resultado en ncspot. Devuelve la pista que empezo a sonar, o None."""
+    resultado en ncspot (o en la app de escritorio si esta abierta). Devuelve la
+    pista que empezo a sonar, o None."""
+    if desktop_running():
+        if _access_token() is None:
+            return None
+        return _desktop_play_query(query, is_genre, genre_filter, timeout)
     if _access_token() is None:
         # sin token de la Web API no hay otra: la busqueda de ncspot (fragil, ver arriba)
         return play_search(genre_filter or query, shuffle=is_genre)
@@ -482,8 +565,8 @@ def _sir(msg: str) -> str:
     return f"{msg.rstrip('.')}, señor."
 
 
-def _now(player: str = "ncspot") -> tuple[str, str]:
-    out = subprocess.run(["playerctl", "-p", player, "metadata", "--format", "{{title}}\t{{artist}}"],
+def _now(name: str | None = None) -> tuple[str, str]:
+    out = subprocess.run(["playerctl", "-p", name or player(), "metadata", "--format", "{{title}}\t{{artist}}"],
                          capture_output=True, text=True).stdout.strip()
     title, _, artist = out.partition("\t")
     return title, artist
@@ -493,7 +576,7 @@ def _play_another(respond) -> bool:
     """"Pon otra": la siguiente de la cola; si no hay (se pidio una cancion
     suelta y la cola solo tiene esa), mas del mismo artista en aleatorio."""
     before, artist = _now()
-    subprocess.run(["playerctl", "-p", "ncspot", "next"], capture_output=True)
+    subprocess.run(["playerctl", "-p", player(), "next"], capture_output=True)
     time.sleep(1.5)
     after, new_artist = _now()
     if after and after != before:
@@ -505,11 +588,13 @@ def _play_another(respond) -> bool:
         return True
     respond(_sir(f"Pongo más de {artist}"))
     try:
-        track = play_query(artist, is_genre=True)  # aleatorio entre sus canciones
+        # en ncspot, aleatorio entre sus canciones; la app de escritorio no arranca
+        # listas, asi que ahi se pone al artista (sus mas populares)
+        track = play_query(artist, is_genre=not desktop_running())
     except OSError:
         track = None
     if track and track.get("title") == before:
-        subprocess.run(["playerctl", "-p", "ncspot", "next"], capture_output=True)  # que no repita la misma
+        subprocess.run(["playerctl", "-p", player(), "next"], capture_output=True)  # que no repita la misma
         time.sleep(1.5)
         track = {"title": _now()[0], "artists": [artist]}
     respond(_sir(f"Reproduciendo {_describe(track)}") if track else _sir(f"No pude poner más de {artist}"))
@@ -517,6 +602,10 @@ def _play_another(respond) -> bool:
 
 
 def _play_shortcut(uri: str, fallback: str, respond) -> bool:
+    if desktop_running():
+        track = _desktop_open_uri(uri, time.time() + 15) or play_query(fallback)
+        respond(_sir(f"Reproduciendo {_describe(track)}") if track else _sir("No pude reproducir la canción"))
+        return True
     if not available():
         respond(_sir("No tengo ncspot instalado para usar Spotify"))
         return True
@@ -554,7 +643,10 @@ def handle(t: str, text: str, respond, escuchar=None) -> bool:
 
     # ---- cerrar
     if has_spotify and re.search(_CLOSE, n) and query is None:
-        if close_spotify():
+        if desktop_running():
+            subprocess.run(["pkill", "-x", "spotify"], capture_output=True)
+            respond(_sir("Spotify cerrado"))
+        elif close_spotify():
             respond(_sir("Spotify cerrado"))
         else:
             respond(_sir("Spotify no estaba abierto"))
@@ -562,24 +654,29 @@ def handle(t: str, text: str, respond, escuchar=None) -> bool:
 
     # ---- ¿es una peticion de Spotify?
     wants_open = has_spotify and re.search(_OPEN, n)
+    desk = desktop_running()
     plays_music = False
     if query is not None and not video:
         if has_spotify or re.search(_MUSIC_WORD, n):
             plays_music = True
-        elif query and available() and (is_running() or re.sub(r"\s+", " ", query) in GENRES):
+        elif query and (desk or available()) and (desk or is_running() or re.sub(r"\s+", " ", query) in GENRES):
             plays_music = True  # "pon queen" con Spotify abierto, o "reproduce salsa"
-        elif not query and re.search(r"\b(?:otra|otro|diferente|siguiente)\b", n) and available() and is_running():
+        elif not query and re.search(r"\b(?:otra|otro|diferente|siguiente)\b", n) and (desk or available() and is_running()):
             plays_music = True  # "pon otra" con Spotify abierto: siguiente cancion
     if not wants_open and not plays_music:
         return False
-    if not available():
+    if not available() and not desk:
         if not has_spotify:
             return False  # sin ncspot, "pon musica de X" cae a YouTube
         respond(_sir("No tengo ncspot instalado para usar Spotify"))
         return True
 
-    # ---- abrir si hace falta
-    if not is_running():
+    # ---- abrir si hace falta (con la app de escritorio abierta se usa esa)
+    if desk:
+        if wants_open and not query:
+            respond(_sir("Spotify ya está abierto"))
+            return True
+    elif not is_running():
         respond(_sir("Abriendo Spotify"))
         ok, why = open_spotify()
         if not ok:

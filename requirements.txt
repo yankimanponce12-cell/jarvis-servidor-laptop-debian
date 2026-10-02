@@ -13,3 +13,5 @@ qrcode[pil]
 cryptography
 requests
 zeroconf
+python-xlib
+mediapipe  # trae opencv-contrib-python (camara.py)

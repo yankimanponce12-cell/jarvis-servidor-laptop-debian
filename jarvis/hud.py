@@ -86,3 +86,15 @@ class Hud:
 
     def hide_qr(self):
         self._ui("ui_hide_qr")
+
+    def show_cam(self, frame):
+        """Vista de la camara (rich.Text, ver camara.vista_previa) encima de todo."""
+        self._ui("ui_show_cam", frame)
+
+    def hide_cam(self, after: float = 0):
+        if after:
+            timer = threading.Timer(after, self.hide_cam)
+            timer.daemon = True
+            timer.start()
+        else:
+            self._ui("ui_hide_cam")

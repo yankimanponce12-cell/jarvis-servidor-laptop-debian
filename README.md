@@ -28,15 +28,28 @@ jarvis
 - Comandos: WhatsApp Web, YouTube, búsquedas en Google, abrir/cerrar apps,
   volumen (PipeWire), brillo, Wi-Fi, Bluetooth, batería, hora/fecha, clima,
   memoria a largo plazo (nombre, notas).
-- La tele Samsung de la sala: prender/apagar, apps, volumen, "modo música"
-  (Spotify de la laptop por HDMI) y "modo juego" (PS5).
+- La tele Samsung de la sala: prender/apagar, apps, volumen, "modo juego" (PS5)
+  y Spotify de la laptop en la tele: "pon spotify en la tele y reproduce acdc"
+  prende la tele, la pone en HDMI 1, manda el audio por HDMI y abre Spotify de
+  escritorio a pantalla completa en la tele (`jarvis/pantalla_tele.py`). Con
+  Spotify de escritorio abierto, "pon queen" / "pon salsa" suenan ahí.
 - Charla libre y acciones ambiguas vía agente local (llama.cpp).
 - Comandos escritos en la misma terminal, y panel web para controlarlo desde el
   celular por HTTPS en la misma red (atajo `F3` = QR con el PIN).
+- Cámara de la laptop (`jarvis/camara.py`, modelos en `~/modelos/camara/`): sabe si
+  estás en el cuarto (al irte pausa la música y al volver la reanuda y te
+  saluda), gestos (✋ palma = callar/pausar, 👍 pulgar = continuar, ✌ paz =
+  siguiente canción) y te reconoce por la cara ("Jarvis, aprende mi cara"
+  muestra la cámara con un contador). Todo local; solo se guardan las firmas
+  numéricas de la cara, no fotos. "Jarvis, apaga la cámara" la suelta.
 - Avisos proactivos (aviso de lluvia) y opcionalmente un reloj ESP32-S3 que
   muestra el estado de Jarvis (`jarvis/watch.py`).
 
 ## Uso
+
+La búsqueda de Spotify usa la Web API con el token de ncspot. Si falta (o
+caduca del todo): `venv/bin/python -m jarvis.spotify_login` y aceptar en el navegador.
+
 
 ```bash
 jarvis                  # escucha "Jarvis"
@@ -71,12 +84,13 @@ Se dicen con "Jarvis" en la frase o se escriben en la línea de la terminal.
 | Wi-Fi | "apaga el wifi", "enciende el wifi", "cómo está el wifi", "qué redes wifi hay" |
 | Bluetooth | "prende/apaga el bluetooth", "escanea dispositivos bluetooth" (los lee y pregunta a cuál emparejarte), "conecta con JBL", "desconecta los audífonos", "qué tengo conectado por bluetooth" |
 | Equipo | "cuánta batería tengo", "cómo está el sistema" (CPU, memoria y gráfica), "temperatura del procesador" |
-| Tele | "prende/apaga la tele", "pon Netflix en la tele", "sube el volumen de la tele 5", "silencia la tele", "modo música" / "quita el modo música", "modo juego" |
+| Tele | "prende/apaga la tele", "pon Netflix en la tele", "sube el volumen de la tele 5", "silencia la tele", "pon spotify en la tele y reproduce acdc" / "modo música" / "quita el modo música", "modo juego", "pon el hdmi" |
 | Spotify (ncspot) | "abre spotify y pon canciones de rock", "pon canciones de acdc", "pon salsa", "pon thunderstruck", "cierra spotify" |
 | Parar | "pausa", "silencio", "para la música", "detén la música", "quítala" (pausa todo lo que suena); "Jarvis, cállate", "basta", "deja de hablar" |
 | Música | "continúa" / "dale play" (reanuda lo que pausó), "siguiente canción", "qué está sonando" (vía playerctl) · "menea tu chapa" (canción fija, ver `SONG_SHORTCUTS` en `music.py`) |
 | Apps y web | "abre firefox", "cierra la calculadora", "busca X en Google", "pon música de X" (YouTube) |
 | Otros | "mándale un mensaje a X" (WhatsApp), "qué hora es", "qué clima hace en X", "¿va a llover al rato?", "probabilidad de lluvia", "acuérdate que ...", "mándame el QR" |
+| Cámara | "aprende mi cara", "olvida mi cara", "apaga/prende la cámara", "cómo está la cámara" · gestos ✋ 👍 ✌ |
 | Demo | "hazme una demo" · "qué puedes hacer" (solo la describe) |
 
 Spotify: necesita `ncspot` con la sesión iniciada (Premium); se abre en una

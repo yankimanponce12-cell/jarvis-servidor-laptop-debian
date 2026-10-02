@@ -12,11 +12,14 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import logging
 
-from jarvis import agent, audio_focus, brain, demo, interrupt, llm, stt_gpu, system, voice_config, voice_output, whatsapp
+from jarvis import agent, audio_focus, brain, camara, demo, interrupt, llm, memory, stt_gpu, system, voice_config, voice_output, whatsapp
 from jarvis import server as jarvis_server
 from jarvis.commands import _is_affirmative, handle_command
 from jarvis.hud import Hud
 from jarvis.proactive import ProactiveSpeaker, greeting_for_time
+from jarvis import alarma
+
+_log = logging.getLogger("jarvis.alarma")  # mismo jarvis.log (ver alarma.py): pausas, gestos e interrupciones
 from jarvis.tui import JarvisApp
 from jarvis.voice_output import hablar, iniciar
 from jarvis.wakeword import extract_command, find_command
@@ -51,6 +54,9 @@ class Session:
         self.listener = None
         self.app = None
         self.proactive = None
+        self.camara = None
+        self._camara_pauso = []  # lo que la camara pauso al irse el usuario (se reanuda al volver)
+        self._booted_at = time.monotonic()
         # un solo comando a la vez: la voz, lo escrito y los avisos
         # proactivos comparten el mismo altavoz y el mismo historial de charla
         self._cmd_lock = threading.Lock()
@@ -110,7 +116,11 @@ class Session:
             self.hud.set_state("inactivo")
         if not self._barge_at:
             self._flush()  # (tras una interrupcion no: el usuario esta hablando)
-        if keep_going and self._ask_pending and not self._interrupted.is_set():
+        # una sola respuesta sin "Jarvis" por orden: si la respuesta a una
+        # pregunta trae otra pregunta, ya no se espera (se encadenaba con
+        # ruido o el audio de la tele, "¿que quiere escuchar?" en bucle)
+        de_seguimiento = self.listener is not None and self.listener.last_follow_up
+        if keep_going and self._ask_pending and not de_seguimiento and not self._interrupted.is_set():
             self._open_follow_up()
         return keep_going
 
@@ -136,6 +146,7 @@ class Session:
         calla (y si la orden nombra la musica, tambien la pausa); si no, pausa
         lo que este sonando. Devuelve True si hizo algo."""
         did = False
+        _log.info(f"Pausa/corte pedido: {command!r}")
         if voice_output.stop():
             did = True
             if self._busy:
@@ -144,7 +155,10 @@ class Session:
             self.hud.log("⏹ Interrumpido")
             if not interrupt.names_media(command):
                 return True
-        if system.pause_all():
+        paused = system.pause_all()
+        if alarma.detener():  # pausar la musica de la alarma tambien la termina
+            self.hud.log("⏹ Alarma apagada")
+        if paused:
             self.hud.set_response("⏸ En pausa. Diga «Jarvis, continúa» para seguir.")
             self.hud.flash("pausa")
             return True
@@ -169,10 +183,58 @@ class Session:
             self._utt_ducked = True  # se le esta hablando: que la musica siga baja
             audio_focus.duck()
         command = find_command(heard) if wake else word
+        _log.info(f"Interrupcion mientras hablaba: oyo {heard!r} (palabra={word!r}, wake={wake})")
         self._stop(command or "")
         if wake and not (command and interrupt.is_stop_command(command)):
             self.hud.set_state("escuchando")
         return True
+
+    # ---- camara (camara.py) ----------------------------------------------
+    def _on_camara(self, tipo: str, dato):
+        """Eventos del hilo de la camara. Lo que tarda va en otro hilo para
+        no frenar la camara."""
+        threading.Thread(target=self._camara_evento, args=(tipo, dato), daemon=True).start()
+
+    def _camara_evento(self, tipo: str, dato):
+        hud = self.hud
+        if tipo == "gesto":
+            _log.info(f"Gesto de la camara: {dato}")
+            if dato == "palma" and alarma.sonando():
+                if alarma.saludando():
+                    hud.log("✋ Gesto ignorado: Jarvis está dando los buenos días")
+                    _log.info("Palma ignorada: buenos dias en curso")
+                else:
+                    hud.log("✋ Alarma apagada con la palma")
+                    alarma.detener(self.respond)
+                return
+            if dato == "palma":  # como "Jarvis, callate / pausa"
+                hud.log("✋ Gesto: alto")
+                self._stop("")
+            elif dato == "pulgar":
+                hud.log("👍 Gesto: continuar")
+                if system.resume():
+                    hud.flash("reanudado")
+            elif dato == "victoria":
+                hud.log("✌ Gesto: siguiente")
+                system.media("next")
+        elif tipo in ("salida", "llegada") and alarma.sonando():
+            _log.info(f"Cámara: {tipo} ignorada durante la alarma")  # no pausar ni saludar encima
+            return
+        elif tipo == "salida":
+            self._camara_pauso = system.pause_all()
+            hud.log("🚶 Saliste: " + ("pausé la música" if self._camara_pauso else "nadie a la vista"))
+        elif tipo == "llegada":
+            if time.monotonic() - self._booted_at < 30:
+                return  # al arrancar ya saluda greeting_for_time()
+            nombre = memory.get_name() if dato else ""
+            hud.log("🙂 Llegaste" + (" (te reconocí)" if dato else ""))
+            if self._camara_pauso:
+                self._camara_pauso = []
+                system.resume()
+            if dato or not camara.instancia or not camara.instancia.tiene_caras:
+                # con caras aprendidas, a un desconocido no se le saluda
+                self.respond(f"Bienvenido de vuelta, {nombre or 'señor'}.")
+                self._flush()
 
     # ---- arranque --------------------------------------------------------
     def on_ready(self):
@@ -205,6 +267,13 @@ class Session:
             self.respond, self._flush, hud=hud
         )
         self.proactive.start()
+        self.despertador = alarma.Despertador(self.respond, self._flush, hud=hud)
+        self.despertador.start()
+        # se crea siempre para que "prende la camara" funcione sin reiniciar
+        self.camara = camara.Camara(self._on_camara)
+        camara.instancia = self.camara
+        if camara.habilitada():
+            self.camara.start()
         hud.set_state("inactivo")
         threading.Thread(target=self.respond, args=(greeting_for_time(),), daemon=True).start()
         self._flush()
@@ -458,6 +527,8 @@ class Session:
                 return
             self._closed = True
         voice_output.stop()
+        if self.camara:
+            self.camara.stop()
         audio_focus.restore_now()  # que la musica no quede atenuada
         whatsapp.close()
         llm.shutdown()

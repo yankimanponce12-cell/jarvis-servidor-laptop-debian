@@ -204,7 +204,7 @@ class Reactor(Widget):
     # Textual redibuja en Python: a 24 fps se comia ~un hilo entero del Ryzen 3
     # 2200U, que ademas necesitan Whisper y la IA. En reposo basta con 4 fps.
     FPS = 12
-    IDLE_EVERY = 3
+    IDLE_EVERY = 6  # en reposo 2 fps: el pulso de abajo se ve igual
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -313,7 +313,7 @@ class NowPlaying(Widget):
 
     def on_mount(self):
         threading.Thread(target=self._poll, daemon=True).start()
-        self.set_interval(1 / 4, self._tick)
+        self.set_interval(1 / 2, self._tick)
 
     def _poll(self):
         """En un hilo aparte: playerctl tarda unos ms y no debe frenar la interfaz."""
@@ -337,8 +337,11 @@ class NowPlaying(Widget):
 
     def _tick(self):
         self.set_class(self.data is None, "-hidden")
-        if self.data is not None:
+        # en pausa no se mueve nada: solo se redibuja si cambio la cancion o el estado
+        key = None if self.data is None else (self.data["playing"], self.data["title"], self.data["artist"])
+        if self.data is not None and (self.data["playing"] or key != getattr(self, "_last_key", None)):
             self.refresh()
+        self._last_key = key
 
     @staticmethod
     def _clock(seconds: float) -> str:
@@ -408,7 +411,8 @@ class WeatherScene(Widget):
         self.border_title = "Clima"
 
     def on_mount(self):
-        self.set_interval(1 / 6, self.refresh)
+        # la escena casi no cambia: 2 fps alcanzan y ahorran CPU al hilo de la interfaz
+        self.set_interval(1 / 2, self.refresh)
 
     def set_data(self, data: dict):
         self.data = data
@@ -459,6 +463,7 @@ class MicBar(Widget):
         super().__init__(**kwargs)
         self._shown = 0.0  # 0..1 suavizado, para que el medidor no parpadee
         self._dragging = False
+        self._last_cell = -1  # solo se redibuja si la barra cambia de largo
 
     def on_mount(self):
         self.set_interval(1 / 10, self._tick)
@@ -470,7 +475,10 @@ class MicBar(Widget):
     def _tick(self):
         frac = min(max(self._frac(mic_config.rms_to_db(mic_config.take_level())), 0.0), 1.0)
         self._shown = max(frac, self._shown - 0.06)  # sube al instante, baja despacio
-        self.refresh()
+        cell = round(self._shown * self._bar_width())
+        if cell != self._last_cell:
+            self._last_cell = cell
+            self.refresh()
 
     def _bar_width(self) -> int:
         return max(self.size.width - self.LABEL_W - self.VALUE_W, 8)
@@ -555,6 +563,11 @@ class JarvisApp(App):
     #qrwrap.-visible { display: block; }
     #qrbox { width: auto; height: auto; padding: 1 3; border: heavy #22d3ee;
              background: #05080a; }
+    #camwrap { layer: overlay; width: 100%; height: 100%; align: center middle;
+               background: #05080a 90%; display: none; }
+    #camwrap.-visible { display: block; }
+    #cambox { width: auto; height: auto; padding: 0 1; border: heavy #22d3ee;
+              border-title-color: #22d3ee; background: #05080a; }
     Footer { background: #0b1418; }
     """
 
@@ -609,6 +622,8 @@ class JarvisApp(App):
             yield Footer()
         with Container(id="qrwrap"):
             yield Static(id="qrbox")
+        with Container(id="camwrap"):
+            yield Static(id="cambox")
 
     def on_mount(self):
         self.query_one("#entrada", Input).focus()
@@ -690,6 +705,9 @@ class JarvisApp(App):
 
     def action_escape(self):
         """Esc: cierra el QR si esta abierto; si no, calla a Jarvis."""
+        if self.query_one("#camwrap").has_class("-visible"):
+            self.ui_hide_cam()
+            return
         if self.query_one("#qrwrap").has_class("-visible"):
             self.ui_hide_qr()
         else:
@@ -760,3 +778,12 @@ class JarvisApp(App):
 
     def ui_hide_qr(self):
         self.query_one("#qrwrap").remove_class("-visible")
+
+    def ui_show_cam(self, frame: Text):
+        box = self.query_one("#cambox", Static)
+        box.border_title = "Cámara"
+        box.update(frame)
+        self.query_one("#camwrap").add_class("-visible")
+
+    def ui_hide_cam(self):
+        self.query_one("#camwrap").remove_class("-visible")

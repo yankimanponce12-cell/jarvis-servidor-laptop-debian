@@ -4,6 +4,8 @@ instante (el usuario dijo "callate") y va publicando el nivel de lo que suena,
 que el reactor de la interfaz usa para moverse al ritmo de la voz."""
 
 import collections
+import os
+import subprocess
 import threading
 import time
 
@@ -23,6 +25,36 @@ SPEECH_RMS = 0.12  # RMS de una voz "fuerte": nivel 1.0 para la animacion
 OUTPUT_LATENCY_S = 0.4
 
 _levels = collections.deque(maxlen=64)  # (cuando se va a OIR, nivel)
+_open_lock = threading.Lock()
+
+
+def laptop_sink() -> str | None:
+    """Las bocinas de la laptop (la placa analogica interna, no el HDMI de la
+    tele ni la salida de audifonos del QuadCast)."""
+    try:
+        out = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        name = line.split("\t")[1] if "\t" in line else ""
+        if name.startswith("alsa_output.pci") and "analog" in name:
+            return name
+    return None
+
+
+def _open_stream(sd, **kwargs):
+    """La voz de Jarvis SIEMPRE por la laptop, aunque la salida predeterminada
+    sea la tele (la musica si se va por HDMI). El plugin ALSA de PipeWire lee
+    PIPEWIRE_NODE al abrir el stream; se quita enseguida para que no afecte al
+    microfono ni a nada mas que se abra despues."""
+    sink = laptop_sink()
+    with _open_lock:
+        if sink:
+            os.environ["PIPEWIRE_NODE"] = sink
+        try:
+            return sd.OutputStream(**kwargs)
+        finally:
+            os.environ.pop("PIPEWIRE_NODE", None)
 
 
 def _report(chunk: np.ndarray, delay: float = 0.0):
@@ -56,7 +88,7 @@ class Player:
         self.stop_event = stop_event
         import sounddevice as sd  # aqui y no arriba: sin PortAudio (libportaudio2) Jarvis igual abre en modo texto
 
-        self._stream = sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32", latency=latency)
+        self._stream = _open_stream(sd, samplerate=sample_rate, channels=1, dtype="float32", latency=latency)
         self._slice = max(int(sample_rate * SLICE_S), 256)
         self.stopped = False
 
