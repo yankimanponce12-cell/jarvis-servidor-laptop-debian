@@ -66,6 +66,11 @@ BASE_URL = os.environ.get("JARVIS_LLM_URL", f"http://127.0.0.1:{PORT}").rstrip("
 _MANAGED = "JARVIS_LLM_URL" not in os.environ
 
 _process: subprocess.Popen | None = None
+_adoptado: int | None = None  # llama-server de un Jarvis anterior que quedo suelto (ver huerfanos.py)
+# Jarvis se esta cerrando: ya no se arranca nada. Sin esto, si se cerraba
+# mientras la IA se calentaba, el hilo de calentamiento veia el servidor caido
+# y arrancaba OTRO, que quedaba huerfano.
+_cerrando = False
 _on_gpu = False
 _lock = threading.Lock()
 
@@ -117,15 +122,27 @@ def _start_server(gpu: bool):
 def ensure_ready(timeout: float = 240.0):
     """Bloquea hasta que el modelo este cargado (lo arranca si hace falta).
     Idempotente. Lanza LLMUnavailable si no se puede."""
+    global _adoptado
+    if _cerrando:
+        raise LLMUnavailable("Jarvis se está cerrando")
     if _healthy():
+        if _MANAGED and _process is None and _adoptado is None:
+            from . import huerfanos
+            _adoptado = huerfanos.buscar([LLAMA_SERVER, LLAMA_SERVER_GPU], PORT)
+            if _adoptado:
+                logger.info("Adopto el llama-server suelto de un Jarvis anterior (pid %s)", _adoptado)
         return
     if not _MANAGED:
         raise LLMUnavailable(f"No responde el servidor LLM en {BASE_URL}")
     with _lock:
+        if _cerrando:
+            raise LLMUnavailable("Jarvis se está cerrando")
         if _process is None or _process.poll() is not None:
             _start_server(USE_GPU and LLAMA_SERVER_GPU.is_file())
         deadline = time.time() + timeout
         while time.time() < deadline:
+            if _cerrando:
+                raise LLMUnavailable("Jarvis se está cerrando")
             if _process.poll() is not None:
                 if _on_gpu:
                     logger.warning("llama-server con Vulkan se cerro (codigo %s); sigo en CPU", _process.returncode)
@@ -430,8 +447,10 @@ def chat_stream(messages: list, on_sentence, tools: list | None = None, max_toke
 
 
 def shutdown():
-    """Cierra el llama-server SOLO si lo arranco Jarvis (uno ajeno no se toca)."""
-    global _process
+    """Cierra el llama-server SOLO si es de Jarvis: el que arranco, o uno suelto
+    de un Jarvis anterior que adopto (uno ajeno no se toca)."""
+    global _process, _adoptado, _cerrando
+    _cerrando = True
     if _process is not None and _process.poll() is None:
         _process.terminate()
         try:
@@ -439,3 +458,7 @@ def shutdown():
         except subprocess.TimeoutExpired:
             _process.kill()
     _process = None
+    if _adoptado:
+        from . import huerfanos
+        huerfanos.terminar(_adoptado)
+        _adoptado = None

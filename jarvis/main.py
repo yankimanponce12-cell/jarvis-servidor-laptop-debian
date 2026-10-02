@@ -643,7 +643,12 @@ def main():
 
     def _terminated(signum, frame):
         # cerrar la ventana de la terminal (SIGHUP) o un `kill` (SIGTERM) mataba
-        # Jarvis SIN correr shutdown(): el llama-server y Brave quedaban huerfanos
+        # Jarvis SIN correr shutdown(): el llama-server y Brave quedaban huerfanos.
+        # Al cerrar la ventana llegan DOS señales seguidas: la segunda hacia
+        # os._exit a media limpieza (se cerraba la IA pero no Whisper). Ahora
+        # la primera ignora las siguientes y termina en orden.
+        for s in (signal.SIGHUP, signal.SIGTERM):
+            signal.signal(s, signal.SIG_IGN)
         session.shutdown()
         os._exit(0)
 

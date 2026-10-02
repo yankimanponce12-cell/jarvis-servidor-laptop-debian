@@ -42,6 +42,8 @@ AUDIO_CTX = 768  # ventana del codificador: 768 de 1500 = 15 s de audio (las fra
 BEAM = 5  # con beam 1 tarda ~1.4 s pero se colaba algun error ("pues musica de rock")
 
 _process: subprocess.Popen | None = None
+_adoptado: int | None = None  # whisper-server de un Jarvis anterior que quedo suelto (ver huerfanos.py)
+_cerrando = False  # Jarvis se esta cerrando: ya no se arranca nada (ver llm._cerrando)
 _lock = threading.Lock()
 
 
@@ -59,11 +61,18 @@ def _healthy() -> bool:
 
 def start(prompt: str, timeout: float = 60) -> bool:
     """Arranca whisper-server (si hace falta) y espera a que cargue. True si quedo listo."""
-    global _process
-    if not available():
+    global _process, _adoptado
+    if not available() or _cerrando:
         return False
     with _lock:
+        if _cerrando:
+            return False
         if _healthy():
+            if _process is None and _adoptado is None:
+                from . import huerfanos
+                _adoptado = huerfanos.buscar([SERVER], PORT)
+                if _adoptado:
+                    logger.info("Adopto el whisper-server suelto de un Jarvis anterior (pid %s)", _adoptado)
             return True
         if _process is None or _process.poll() is not None:
             (PROJECT_ROOT / "logs").mkdir(exist_ok=True)
@@ -75,6 +84,8 @@ def start(prompt: str, timeout: float = 60) -> bool:
             )
         deadline = time.time() + timeout
         while time.time() < deadline:
+            if _cerrando:
+                return False
             if _process.poll() is not None:
                 logger.warning("whisper-server se cerro (codigo %s), sigo con Whisper en CPU", _process.returncode)
                 return False
@@ -115,7 +126,8 @@ def transcribe(audio: np.ndarray, sample_rate: int = 16000, timeout: float = 30)
 
 
 def shutdown():
-    global _process
+    global _process, _adoptado, _cerrando
+    _cerrando = True
     if _process is not None and _process.poll() is None:
         _process.terminate()
         try:
@@ -123,3 +135,7 @@ def shutdown():
         except subprocess.TimeoutExpired:
             _process.kill()
     _process = None
+    if _adoptado:
+        from . import huerfanos
+        huerfanos.terminar(_adoptado)
+        _adoptado = None
