@@ -1,11 +1,13 @@
 """Invitados en Telegram (el papá del dueño): pueden platicar con Jarvis un
 poco, pero con muchas restricciones por privacidad.
 
-Cómo entra uno: el dueño escribe "invita a mi papá" → Jarvis le da un código
-de 6 dígitos que vale CODIGO_MIN minutos → el papá abre el bot y manda el
-código → queda registrado y al dueño le llega el aviso. Sin código válido,
-cualquier otro chat se sigue ignorando sin contestar (5 códigos mal = el
-código se anula).
+Cómo entra uno: abre el bot, Jarvis le pide su código de acceso, y manda el
+CÓDIGO FIJO (telegram_config.json "codigo_invitado", el del papá; el dueño lo
+cambia con "cambia el código a 123456") o uno de un solo uso que el dueño saca
+con "invita a mi mamá" (vale CODIGO_MIN minutos). Al dueño le llega un aviso
+cada vez que alguien entra. Protección: un chat con INTENTOS_CHAT códigos mal
+queda bloqueado; con FALLOS_HORA fallos en una hora entre todos, el código
+fijo se pausa una hora (por si prueban desde muchas cuentas).
 
 Lo que SÍ puede un invitado:
 - platicar con Jarvis: la IA SIN herramientas, SIN la memoria del dueño y con
@@ -34,6 +36,9 @@ log = logging.getLogger("jarvis.alarma")  # mismo jarvis.log (el handler lo pone
 
 CODIGO_MIN = 10
 CODIGO_INTENTOS = 5
+INTENTOS_CHAT = 5  # códigos mal desde un mismo chat = bloqueado
+FALLOS_HORA = 15  # fallos en una hora entre todos = el código fijo se pausa una hora
+NOMBRE_FIJO = "papá"  # con el código fijo entra el papá
 PERMISO_MIN = 30
 MAX_MENSAJES_MIN = 8  # un invitado no puede mandar más que esto por minuto
 REPETIR_PEDIDO_S = 120  # tras un "no", el invitado no puede volver a pedir foto en este rato
@@ -45,6 +50,10 @@ _pedidos: dict[int, float] = {}  # invitado -> cuando pidió foto (esperando al 
 _negado: dict[int, float] = {}  # invitado -> cuando el dueño dijo que no
 _historial: dict[int, list] = {}
 _ritmo: dict[int, deque] = {}
+_intentos: dict[int, int] = {}  # chat desconocido -> códigos mal
+_pedido_codigo: dict[int, float] = {}  # chat desconocido -> cuando se le pidió el código
+_fallos: deque = deque()  # horas de los fallos (todos los chats)
+_pausado_hasta = 0.0
 
 _ACENTOS = str.maketrans("áéíóúñü", "aeiounu")
 _FOTO = (r"\b(?:foto|fotito|fotografia|imagen|captura|ver el cuarto|ensename el cuarto|como esta el cuarto|"
@@ -123,36 +132,83 @@ def _quitar_permiso(chat_id: int):
         _guardar_invitados(inv)
 
 
-def registrar_si_codigo(chat_id: int, texto: str, nombre_tg: str) -> bool:
-    """Un chat desconocido manda un mensaje: si es el código vigente, queda
-    como invitado. Si no, False y no se le contesta nada."""
-    with _lock:
-        c = _codigo
-        if not c or time.time() > c["hasta"]:
-            return False
-        digitos = re.sub(r"\D", "", texto)
-        if not digitos:
-            return False  # "/start", "hola": no cuenta como intento
-        if digitos != c["codigo"]:
-            c["intentos"] += 1
-            if c["intentos"] >= CODIGO_INTENTOS:
-                _codigo.clear()
-                telegram.enviar("⚠ Anulé el código de invitado: alguien lo intentó 5 veces mal.")
-                log.warning("Invitados: código anulado por intentos fallidos")
-            return False
-        quien = c["nombre"]
-        _codigo.clear()
+def _bloqueados() -> set:
+    return set(telegram._config().get("bloqueados", []))
+
+
+def _bloquear(chat_id: int):
+    cfg = telegram._config()
+    cfg["bloqueados"] = sorted(set(cfg.get("bloqueados", [])) | {str(chat_id)})
+    telegram._guardar(cfg)
+
+
+def _registrar(chat_id: int, quien: str, nombre_tg: str):
     inv = _invitados()
-    inv[str(chat_id)] = {"nombre": quien, "telegram": nombre_tg, "desde": datetime.datetime.now().isoformat(timespec="seconds"),
-                         "foto_hasta": 0}
+    if any(_norm(d["nombre"]) == _norm(quien) for c, d in inv.items() if c != str(chat_id)):
+        quien = f"invitado {nombre_tg or chat_id}"  # ya hay un "papá": el segundo no se llama igual
+    inv[str(chat_id)] = {"nombre": quien, "telegram": nombre_tg,
+                         "desde": datetime.datetime.now().isoformat(timespec="seconds"), "foto_hasta": 0}
     _guardar_invitados(inv)
+    _intentos.pop(chat_id, None)
     log.info(f"Invitados: registrado {quien} ({nombre_tg}, chat {chat_id})")
-    telegram.enviar(f"✅ Tu {quien} ya está conectado a Jarvis ({nombre_tg} en Telegram). Puede platicar y "
-                    f"pedir fotos, que tú autorizas. Para quitarlo: «quita a mi {quien}».")
+    telegram.enviar(f"✅ Entró con el código: {nombre_tg or 'sin nombre'} (quedó como «{quien}»). Puede platicar y "
+                    f"pedir fotos, que tú autorizas. Si no es quien esperabas: «quita a {quien}».")
     telegram.enviar(f"Mucho gusto, señor. Soy Jarvis, el asistente que construyó {_dueno()}. Puede platicar "
                     "conmigo cuando guste, preguntarme la hora o el clima, o pedirme una foto del cuarto "
                     f"(se la mando si {_dueno()} lo autoriza). Escriba «ayuda» cuando quiera.", chat_id=chat_id)
-    return True
+
+
+def registrar_si_codigo(chat_id: int, texto: str, nombre_tg: str) -> bool:
+    """Mensaje de un chat desconocido: le pide el código, lo verifica y, si
+    es bueno, lo registra como invitado. True si quedó registrado."""
+    global _pausado_hasta
+    if str(chat_id) in _bloqueados():
+        return False  # bloqueado: ni se contesta
+    ahora = time.time()
+    digitos = re.sub(r"\D", "", texto)
+    if not digitos:
+        if ahora - _pedido_codigo.get(chat_id, 0) > 3600:  # se pide una vez (por hora), sin insistir
+            _pedido_codigo[chat_id] = ahora
+            telegram.enviar("Hola 👋 Soy Jarvis. Para hablar conmigo, envíe su código de acceso.", chat_id=chat_id)
+        return False
+    pausado, quien, quedan = False, None, 0
+    with _lock:
+        fijo = telegram._config().get("codigo_invitado")
+        temporal = _codigo if _codigo and ahora <= _codigo["hasta"] else None
+        if fijo and digitos == fijo:
+            if ahora < _pausado_hasta:
+                pausado = True  # código bueno, pero en pausa por demasiados fallos
+            else:
+                quien = NOMBRE_FIJO
+        elif temporal and digitos == temporal["codigo"]:
+            quien = temporal["nombre"]
+            _codigo.clear()
+        else:
+            _intentos[chat_id] = _intentos.get(chat_id, 0) + 1
+            _fallos.append(ahora)
+            while _fallos and ahora - _fallos[0] > 3600:
+                _fallos.popleft()
+            quedan = INTENTOS_CHAT - _intentos[chat_id]
+    if quien:
+        _registrar(chat_id, quien, nombre_tg)
+        return True
+    if pausado:
+        telegram.enviar("El acceso está pausado por seguridad. Inténtelo en una hora.", chat_id=chat_id)
+        return False
+    log.warning(f"Invitados: código incorrecto desde {nombre_tg} (chat {chat_id})")
+    if quedan <= 0:
+        _bloquear(chat_id)
+        telegram.enviar("Demasiados intentos. Ya no puedo atenderle.", chat_id=chat_id)
+        telegram.enviar(f"⚠ Bloqueé a {nombre_tg or chat_id} en Telegram: intentó {INTENTOS_CHAT} códigos incorrectos.")
+    else:
+        telegram.enviar(f"Código incorrecto. Le {'queda 1 intento' if quedan == 1 else f'quedan {quedan} intentos'}.",
+                        chat_id=chat_id)
+    if len(_fallos) >= FALLOS_HORA and ahora >= _pausado_hasta:
+        _pausado_hasta = ahora + 3600
+        _fallos.clear()
+        telegram.enviar(f"⚠ Pausé el código de acceso una hora: {FALLOS_HORA} intentos fallidos en una hora "
+                        "(alguien podría estar intentando adivinarlo). Si quieres, cámbialo: «cambia el código a 123456».")
+    return False
 
 
 # --------------------------------------------------------- comandos dueño --
@@ -182,6 +238,28 @@ def comando_dueno(texto: str) -> str | None:
             lineas.append(f"• Tu {d['nombre']} ({d.get('telegram', '')}): "
                           + (f"puede ver la cámara {int(p // 60) + 1} min más" if p else "sin permiso de cámara"))
         return "Invitados:\n" + "\n".join(lineas)
+    m = re.search(r"\bcodigo\b.*?\b(\d{6})\b", n)
+    if m and re.search(r"^(?:cambia|pon|nuevo|establece)\b", n):
+        cfg = telegram._config()
+        cfg["codigo_invitado"] = m.group(1)
+        telegram._guardar(cfg)
+        global _pausado_hasta
+        _pausado_hasta = 0.0
+        return f"Listo, el código de acceso ahora es {m.group(1)}. El anterior ya no sirve (quien ya entró sigue entrando)."
+    if re.search(r"^(?:desactiva|quita|borra|apaga)\s+(?:el\s+)?codigo\b", n):
+        cfg = telegram._config()
+        cfg.pop("codigo_invitado", None)
+        telegram._guardar(cfg)
+        return "Desactivé el código de acceso. Nadie nuevo puede entrar (para uno solo: «invita a mi mamá»)."
+    if re.search(r"^(?:cual es el|dime el|ver el)\s+codigo\b|^codigo$", n):
+        fijo = telegram._config().get("codigo_invitado")
+        return f"El código de acceso es {fijo}." if fijo else "No hay código de acceso activo."
+    if re.search(r"^(?:desbloquea|desbloquear)\b", n):
+        cfg = telegram._config()
+        cfg["bloqueados"] = []
+        telegram._guardar(cfg)
+        _intentos.clear()
+        return "Listo, desbloqueé a todos los que habían fallado el código."
     m = re.search(r"^(?:invita|invitar|agrega|agregar|registra|conecta)\s+a\s+(.+)$", n)
     if m:
         orig = re.search(r"\ba\s+(.+?)[\s.!?¿¡]*$", texto.strip(), re.IGNORECASE)

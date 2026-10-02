@@ -54,7 +54,8 @@ AYUDA = (
     "• recuérdame sacar la ropa en 40 minutos\n"
     "• alarma a las 6 de la mañana\n"
     "• invita a mi papá / invitados / quita a mi papá\n"
-    "• dale permiso a mi papá 30 minutos / quítale el permiso a mi papá"
+    "• dale permiso a mi papá 30 minutos / quítale el permiso a mi papá\n"
+    "• cuál es el código / cambia el código a 123456 / desactiva el código / desbloquea"
     "\n\nSi me manda una nota de voz, le contesto con voz."
 )
 
