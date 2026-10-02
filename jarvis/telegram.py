@@ -205,15 +205,18 @@ class Bot:
     def _run(self):
         offset = None
         dueno = _config()["chat_id"]
+        espera = 2  # reintento tras un error: 2, 4, 8... hasta 30 s (antes 15 s fijos)
         while not self._stop.is_set():
             try:
                 params = {"timeout": POLL_S, "allowed_updates": json.dumps(["message"])}
                 if offset is not None:
                     params["offset"] = offset
                 updates = _api("getUpdates", timeout=POLL_S + 15, data=params)
+                espera = 2
             except Exception as exc:
-                log.warning(f"Telegram: sin conexión ({exc}); reintento en 15 s")
-                self._stop.wait(15)
+                log.warning(f"Telegram: sin conexión ({exc}); reintento en {espera} s")
+                self._stop.wait(espera)
+                espera = min(espera * 2, 30)
                 continue
             for u in updates:
                 offset = u["update_id"] + 1
@@ -222,6 +225,10 @@ class Bot:
                     continue  # otro chat: ni se contesta
                 texto = (msg.get("text") or "").strip()
                 audio = msg.get("voice") or msg.get("audio")
+                # cuanto tardo en LLEGAR (Telegram da la hora de envio, al segundo)
+                retraso = time.time() - msg.get("date", time.time())
+                if retraso > 5:
+                    log.warning(f"Telegram: el mensaje llegó con {retraso:.0f} s de retraso")
                 if texto:
                     threading.Thread(target=self._atender, args=(texto,), daemon=True).start()
                 elif audio:
