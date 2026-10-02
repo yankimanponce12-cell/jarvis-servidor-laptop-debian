@@ -120,83 +120,10 @@ def vista_previa(cv2, small, cara, n: int, meta: int, guardo: bool):
     return t
 
 
-class Visor:
-    """La ventana de la camara en otro proceso (camara_ventana.py): si Qt se
-    cuelga ahi, la camara sigue. Los cuadros se mandan SIN bloquear: si el
-    visor va atrasado se descartan, y si no recibe nada en VISOR_COLGADO_S se
-    da por colgado, se mata y la camara sigue sin ventana."""
-
-    VISOR_COLGADO_S = 10.0
-    ANCHO_VISTA = 960  # la ventana es de 960x540: se manda ya achicado
-
-    def __init__(self):
-        self._proc = None
-        self._pendiente = b""
-        self._atascado_desde = 0.0
-        self.cerrada_por_usuario = False
-
-    def enviar(self, cv2, img) -> bool:
-        """False si el visor ya no sirve (colgado, o el usuario cerro la ventana)."""
-        import struct
-        import subprocess
-        import sys
-
-        if self._proc is not None and self._proc.poll() is not None:
-            from .camara_ventana import CERRADA_POR_USUARIO
-            self.cerrada_por_usuario = self._proc.returncode == CERRADA_POR_USUARIO
-            if not self.cerrada_por_usuario:
-                log.warning("camara: el visor se cerro (codigo %s)", self._proc.returncode)
-            self._proc = None
-            return False
-        if self._proc is None:
-            self._proc = subprocess.Popen([sys.executable, "-m", "jarvis.camara_ventana"], stdin=subprocess.PIPE,
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                          cwd=str(DATOS), start_new_session=True)
-            os.set_blocking(self._proc.stdin.fileno(), False)
-            self._pendiente, self._atascado_desde = b"", 0.0
-        fd = self._proc.stdin.fileno()
-        if not self._pendiente:  # el cuadro anterior ya salio entero: va el nuevo
-            h, w = img.shape[:2]
-            chico = cv2.resize(img, (self.ANCHO_VISTA, self.ANCHO_VISTA * h // w), interpolation=cv2.INTER_AREA)
-            ok, jpg = cv2.imencode(".jpg", chico, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            if not ok:
-                return True
-            self._pendiente = struct.pack(">I", len(jpg)) + jpg.tobytes()
-        try:
-            n = os.write(fd, self._pendiente)
-            self._pendiente = self._pendiente[n:]
-        except BlockingIOError:
-            pass  # el visor no esta leyendo: se reintenta en el siguiente cuadro
-        except (BrokenPipeError, OSError):
-            self.cerrar()
-            return False
-        if self._pendiente:
-            self._atascado_desde = self._atascado_desde or time.time()
-            if time.time() - self._atascado_desde > self.VISOR_COLGADO_S:
-                log.warning("camara: el visor no responde (¿Qt colgado?); sigo sin ventana")
-                self.cerrar()
-                return False
-        else:
-            self._atascado_desde = 0.0
-        return True
-
-    def cerrar(self):
-        proc, self._proc = self._proc, None
-        if proc is None:
-            return
-        try:
-            proc.stdin.close()
-        except OSError:
-            pass
-        try:
-            proc.wait(timeout=1)
-        except Exception:
-            proc.kill()
-
-
 class Camara:
-    def __init__(self, on_event):
+    def __init__(self, on_event, on_vista=None):
         self._on_event = on_event
+        self._on_vista = on_vista  # panel "Camara" de la terminal (tui.CamView): dict de vista() o None
         self._stop = threading.Event()
         self._thread = None
         self._presente = False
@@ -352,8 +279,7 @@ class Camara:
         ultima_muestra = 0.0
         vista = {"mano": None, "mano_t": 0.0, "gesto": None, "score": 0.0, "disparo": None, "disparo_t": 0.0,
                  "persona": None, "nombre": None}
-        abierta = False  # la ventana ya se mostro
-        visor = Visor()  # la ventana va en otro proceso (ver camara_ventana.py)
+        abierta = False  # el panel de la terminal esta mostrando la camara
         try:
             while not self._stop.is_set():
                 t0 = time.time()
@@ -451,10 +377,11 @@ class Camara:
                     gestos.clear()
                     disparado = None
 
-                if self.ventana:
-                    abierta = self._mostrar(frame, caras, vista, ahora, visor)
+                if self.ventana and self._on_vista:
+                    self._on_vista(self._vista(small, caras, vista, ahora))
+                    abierta = True
                 elif abierta:
-                    visor.cerrar()
+                    self._on_vista(None)
                     abierta = False
 
                 fps = FPS if ahora - ultimo_mov < REPOSO_TRAS_S or self._aprendiendo is not None else FPS_REPOSO
@@ -464,55 +391,29 @@ class Camara:
             log.exception("camara: hilo")
         finally:
             cap.release()
-            visor.cerrar()
+            if abierta:
+                self._on_vista(None)
 
-    # ---------------------------------------------------------- ventana --
-    def _mostrar(self, frame, caras, vista: dict, ahora: float, visor: Visor) -> bool:
-        """Dibuja lo que Jarvis ve (caras, cuerpo, esqueleto de la mano, gesto)
-        sobre el cuadro de 720p y se lo manda al visor (otro proceso). Devuelve
-        si la ventana sigue abierta. Si el usuario la cierra con la X, o el
-        visor se cuelga, no se vuelve a abrir hasta pedirlo."""
-        cv2 = self._cv2
-        try:
-            img = frame.copy()
-            h, w = img.shape[:2]
-            sx, sy = w / ANCHO, h / ALTO
-            verde, cian, ambar = (80, 220, 100), (238, 211, 34), (36, 191, 251)
-            for c in (caras if caras is not None else []):
-                x, y, cw, ch = (int(c[0] * sx), int(c[1] * sy), int(c[2] * sx), int(c[3] * sy))
-                color = verde if vista["nombre"] else cian
-                cv2.rectangle(img, (x, y), (x + cw, y + ch), color, 2)
-                cv2.putText(img, f"{vista['nombre'] or 'cara'} {c[-1]:.0%}", (x, max(20, y - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-            b = vista["persona"]
-            if b is not None:
-                cv2.rectangle(img, (int(b.origin_x * sx), int(b.origin_y * sy)),
-                              (int((b.origin_x + b.width) * sx), int((b.origin_y + b.height) * sy)), ambar, 2)
-            if vista["mano"] is not None and ahora - vista["mano_t"] < 0.6:
-                pts = [(int(p.x * w), int(p.y * h)) for p in vista["mano"]]
-                for a, z in MANO:
-                    cv2.line(img, pts[a], pts[z], (255, 255, 255), 2)
-                for pt in pts:
-                    cv2.circle(img, pt, 4, cian, -1)
-                if vista["gesto"] and vista["gesto"] != "None":
-                    cv2.putText(img, f"{vista['gesto']} {vista['score']:.0%}", (pts[0][0] - 40, pts[0][1] + 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, cian, 2)
-            # barra de estado
-            cv2.rectangle(img, (0, 0), (w, 44), (20, 20, 20), -1)
-            estado = "te veo" if self._presente else "no te veo"
-            cv2.putText(img, f"JARVIS  |  {estado}  |  vista {w}x{h}, analisis {ANCHO}x{ALTO} a {FPS} fps",
-                        (14, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (230, 230, 230), 2)
-            if vista["disparo"] and ahora - vista["disparo_t"] < 1.5:
-                texto = {"palma": "PALMA: alto", "pulgar": "PULGAR: continuar", "victoria": "VICTORIA: siguiente"}.get(vista["disparo"], vista["disparo"])
-                cv2.putText(img, texto, (30, h - 40), cv2.FONT_HERSHEY_SIMPLEX, 1.6, verde, 4)
-            if visor.enviar(cv2, img):
-                return True
-            self.ventana = False
-            return False
-        except Exception:
-            log.exception("camara: ventana")
-            self.ventana = False  # sin pantalla (o Qt fallo): seguir sin ventana
-            return False
+    # ----------------------------------------------------------- vista --
+    def _vista(self, small, caras, vista: dict, ahora: float) -> dict:
+        """Lo que necesita el panel "Camara" de la terminal (tui.CamView): la
+        imagen de analisis (320x180, sin copiar: cada cuadro es nuevo) y lo
+        detectado, en coordenadas de esa imagen. El panel lo dibuja a su
+        tamaño, asi las lineas salen nitidas aunque la vista sea chica."""
+        b = vista["persona"]
+        mano = vista["mano"] if vista["mano"] is not None and ahora - vista["mano_t"] < 0.6 else None
+        disparo = vista["disparo"] if vista["disparo"] and ahora - vista["disparo_t"] < 1.5 else None
+        return {
+            "img": small,
+            "caras": [tuple(float(v) for v in c[:4]) for c in (caras if caras is not None else [])],
+            "persona": (b.origin_x, b.origin_y, b.width, b.height) if b is not None else None,
+            "mano": [(p.x, p.y) for p in mano] if mano else None,
+            "gesto": vista["gesto"] if mano and vista["gesto"] not in (None, "None") else None,
+            "score": vista["score"],
+            "disparo": disparo,
+            "nombre": vista["nombre"],
+            "presente": self._presente,
+        }
 
     def _emit(self, tipo: str, dato):
         try:

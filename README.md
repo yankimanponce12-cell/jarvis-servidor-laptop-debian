@@ -75,6 +75,7 @@ jarvis --mute           # no habla en voz alta
 | `F5`     | demo en vivo (o el botón **▶ Demo**; otra vez = detener) |
 | `F6`/`F7`| baja/sube el umbral del micrófono                   |
 | `F8`     | vista previa de las escenas del clima               |
+| `F9`     | muestra u oculta la cámara (panel dentro de la terminal) |
 | `Ctrl+L` | nueva charla (borra el contexto corto, no la memoria) |
 | `Ctrl+Q` | salir (también "Jarvis, adiós")                     |
 

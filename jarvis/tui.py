@@ -449,6 +449,94 @@ class WeatherScene(Widget):
         return art
 
 
+class CamView(Widget):
+    """Lo que ve la camara, dentro de la terminal (antes era una ventana de
+    OpenCV aparte; al usuario no le gustaba fuera, y Qt llego a colgarse).
+    Cada caracter "▀" son 2 pixeles (arriba color del texto, abajo el fondo),
+    en espejo como un espejo de verdad. Los recuadros de la cara y el cuerpo y
+    el esqueleto de la mano se dibujan YA al tamaño del panel, para que no se
+    pierdan al achicar. Nombre, gesto y estado van en el borde.
+    camara.py manda los datos (Camara._vista) unas 2-5 veces por segundo."""
+
+    DEFAULT_CSS = """
+    CamView { width: 100%; height: 12; margin: 0 1; border: round #16303a; border-title-color: #22d3ee;
+              border-subtitle-color: #4ade80; display: none; }
+    CamView.-visible { display: block; }
+    """
+    MAX_FILAS = 16
+    VERDE, CIAN, AMBAR, BLANCO = (100, 220, 80), (34, 211, 238), (251, 191, 36), (255, 255, 255)  # RGB
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.data: dict | None = None
+        self.border_title = "Cámara"
+
+    def set_data(self, data: dict | None):
+        self.data = data
+        self.set_class(data is not None, "-visible")
+        if data is None:
+            return
+        partes = ["Cámara", "te veo" if data["presente"] else "no veo a nadie"]
+        if data["nombre"]:
+            partes.append("te reconozco")
+        self.border_title = " · ".join(partes)
+        disparo = {"palma": "✋ alto", "pulgar": "👍 continuar", "victoria": "✌ siguiente"}.get(data["disparo"] or "")
+        self.border_subtitle = disparo or (f"{data['gesto']} {data['score']:.0%}" if data["gesto"] else "")
+        self._ajustar_alto()
+        self.refresh()
+
+    def on_resize(self, event: events.Resize):
+        self._ajustar_alto()
+
+    def _ajustar_alto(self):
+        """16:9 con caracteres de 1x2 pixeles: filas = columnas * 9 / 32."""
+        cols = max(self.size.width, 8)
+        filas = min(self.MAX_FILAS, max(4, round(cols * 9 / 32)))
+        if self.styles.height is None or self.styles.height.value != filas + 2:
+            self.styles.height = filas + 2  # + el borde
+
+    def render(self) -> Text:
+        d = self.data
+        width, filas = self.size
+        if d is None or width < 8 or filas < 2:
+            return Text("")
+        import cv2
+        from rich.color import Color
+        from rich.style import Style
+
+        cols = min(width, round(filas * 32 / 9))
+        alto_img = d["img"].shape[0]
+        ancho_img = d["img"].shape[1]
+        img = cv2.cvtColor(cv2.resize(d["img"], (cols, filas * 2), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
+        sx, sy = cols / ancho_img, filas * 2 / alto_img
+        for x, y, w, h in d["caras"]:
+            color = self.VERDE if d["nombre"] else self.CIAN
+            cv2.rectangle(img, (int(x * sx), int(y * sy)), (int((x + w) * sx), int((y + h) * sy)), color, 1)
+        if d["persona"]:
+            x, y, w, h = d["persona"]
+            cv2.rectangle(img, (int(x * sx), int(y * sy)), (int((x + w) * sx), int((y + h) * sy)), self.AMBAR, 1)
+        if d["mano"]:
+            from jarvis.camara import MANO
+            pts = [(int(px * cols), int(py * filas * 2)) for px, py in d["mano"]]
+            for a, z in MANO:
+                cv2.line(img, pts[a], pts[z], self.BLANCO, 1)
+            for pt in pts[4::4]:  # las puntas de los dedos
+                cv2.circle(img, pt, 0, self.CIAN, -1)
+        img = img[:, ::-1]  # espejo
+        t = Text(no_wrap=True, overflow="crop")
+        margen = " " * ((width - cols) // 2)
+        for fila in range(filas):
+            t.append(margen)
+            arriba, abajo = img[2 * fila], img[2 * fila + 1]
+            for col in range(cols):
+                r1, g1, b1 = arriba[col]
+                r2, g2, b2 = abajo[col]
+                t.append("▀", Style(color=Color.from_rgb(r1, g1, b1), bgcolor=Color.from_rgb(r2, g2, b2)))
+            if fila < filas - 1:
+                t.append("\n")
+        return t
+
+
 class MicBar(Widget):
     """Medidor del microfono con el umbral ajustable: la barra se llena con el
     nivel en vivo y la marca ┃ es el umbral; lo que suene por debajo de la
@@ -546,6 +634,8 @@ class JarvisApp(App):
     #weather.-compact { height: 10; }
     #weather.-hidden { display: none; }
     #body.-narrow #weather { display: none; }
+    #left.-cam #weather { display: none; }
+    #body.-narrow #camview { display: none; }
     #right { width: 1fr; }
     #body.-narrow { layout: vertical; }
     #body.-narrow #left { width: 100%; height: 14; }
@@ -581,6 +671,7 @@ class JarvisApp(App):
         Binding("f6", "mic_menos", "Mic -"),
         Binding("f7", "mic_mas", "Mic +"),
         Binding("f8", "clima", "Clima"),
+        Binding("f9", "camara", "Cámara"),
         Binding("ctrl+l", "olvidar", "Nueva charla"),
         Binding("escape", "escape", "Callar"),
     ]
@@ -603,6 +694,7 @@ class JarvisApp(App):
             with Horizontal(id="body"):
                 with Vertical(id="left"):
                     yield Reactor(id="reactor")
+                    yield CamView(id="camview")
                     yield NowPlaying(id="nowplaying")
                     yield WeatherScene(id="weather")
                 with Vertical(id="right"):
@@ -693,6 +785,9 @@ class JarvisApp(App):
 
     def action_clima(self):
         self.query_one("#weather", WeatherScene).next_preview()
+
+    def action_camara(self):
+        self.controller.on_toggle_cam()
 
     def action_mic_menos(self):
         self.query_one("#micbar", MicBar).nudge(-2)
@@ -787,3 +882,7 @@ class JarvisApp(App):
 
     def ui_hide_cam(self):
         self.query_one("#camwrap").remove_class("-visible")
+
+    def ui_cam_vista(self, data: dict | None):
+        self.query_one("#camview", CamView).set_data(data)
+        self.query_one("#left").set_class(data is not None, "-cam")

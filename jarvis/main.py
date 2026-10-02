@@ -283,7 +283,7 @@ class Session:
         self.despertador = alarma.Despertador(self.respond, self._flush, hud=hud)
         self.despertador.start()
         # se crea siempre para que "prende la camara" funcione sin reiniciar
-        self.camara = camara.Camara(self._on_camara)
+        self.camara = camara.Camara(self._on_camara, on_vista=hud.camara_vista)
         camara.instancia = self.camara
         if camara.habilitada() or vigilancia.activa():
             self.camara.start()
@@ -515,6 +515,20 @@ class Session:
                 self.hud.set_demo(False)
                 self.hud.set_state("inactivo")
                 self._flush()
+
+    def on_toggle_cam(self):
+        """F9: muestra u oculta el panel de la camara (y la prende si hace falta)."""
+        cam = self.camara
+        if cam is None:
+            return
+        mostrar = not (cam.ventana and cam.activa)
+        cam.ventana = mostrar
+        camara._guardar_config(ventana=mostrar)
+        if mostrar and not cam.activa:
+            cam.encender()
+            self.hud.log("📷 Prendiendo la cámara...")
+        elif not mostrar:
+            self.hud.camara_vista(None)
 
     def on_toggle_mute(self):
         self.muted = not self.muted

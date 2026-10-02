@@ -87,6 +87,10 @@ class Hud:
     def hide_qr(self):
         self._ui("ui_hide_qr")
 
+    def camara_vista(self, data):
+        """Panel "Camara" de la terminal (tui.CamView); None lo oculta."""
+        self._ui("ui_cam_vista", data)
+
     def show_cam(self, frame):
         """Vista de la camara (rich.Text, ver camara.vista_previa) encima de todo."""
         self._ui("ui_show_cam", frame)
