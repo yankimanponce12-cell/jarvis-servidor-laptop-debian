@@ -61,3 +61,8 @@ voces/
 camara_caras.json
 camara_config.json
 alarma.json
+telegram_config.json
+recordatorios.json
+vigilancia.json
+visitas.json
+personalidad.json

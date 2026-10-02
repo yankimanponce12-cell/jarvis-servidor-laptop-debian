@@ -42,6 +42,11 @@ jarvis
   siguiente canción) y te reconoce por la cara ("Jarvis, aprende mi cara"
   muestra la cámara con un contador). Todo local; solo se guardan las firmas
   numéricas de la cara, no fotos. "Jarvis, apaga la cámara" la suelta.
+- Telegram (`jarvis/telegram.py`): se le escribe al bot desde cualquier lugar
+  ("prende la tele", "estado", "foto", "recuérdame…") y manda avisos al celular:
+  alguien entró (vigilancia, con foto), la alarma no se apagó, batería baja y
+  recordatorios. Configurar una vez: `venv/bin/python -m jarvis.telegram
+  configurar <TOKEN de @BotFather>` y mandarle un mensaje al bot.
 - Avisos proactivos (aviso de lluvia) y opcionalmente un reloj ESP32-S3 que
   muestra el estado de Jarvis (`jarvis/watch.py`).
 
@@ -91,6 +96,10 @@ Se dicen con "Jarvis" en la frase o se escriben en la línea de la terminal.
 | Apps y web | "abre firefox", "cierra la calculadora", "busca X en Google", "pon música de X" (YouTube) |
 | Otros | "mándale un mensaje a X" (WhatsApp), "qué hora es", "qué clima hace en X", "¿va a llover al rato?", "probabilidad de lluvia", "acuérdate que ...", "mándame el QR" |
 | Cámara | "aprende mi cara", "olvida mi cara", "apaga/prende la cámara", "cómo está la cámara" · gestos ✋ 👍 ✌ |
+| Alarma | "alarma a las 6 de la mañana", "despiértame en 20 minutos", "a qué hora está la alarma", "cancela la alarma" · al sonar: ✋ palma, "ya me desperté", "apágala" o "pausa" |
+| Recordatorios | "recuérdame sacar la ropa en 40 minutos", "recuérdame a las 5 llamar a mi mamá", "pon un temporizador de 10 minutos", "cuánto le falta al temporizador", "qué recordatorios tengo", "cancela el temporizador" |
+| Vigilancia | "activa la vigilancia" (si entra alguien que no eres tú, foto al celular; se apaga sola al reconocerte), "desactiva la vigilancia", "quién vino mientras no estaba", "alguien entró hoy" |
+| Personalidad | comenta solo si te desvelas (pasada la 1 AM) o llevas 2/4/6 horas en la PS5 · "cuánto llevo jugando", "sin comentarios" / "vuelve a comentar" |
 | Demo | "hazme una demo" · "qué puedes hacer" (solo la describe) |
 
 Spotify: necesita `ncspot` con la sesión iniciada (Premium); se abre en una

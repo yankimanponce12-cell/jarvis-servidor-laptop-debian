@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import audio_focus, music, pantalla_tele, weather
+from . import audio_focus, avisos, music, pantalla_tele, weather
 
 logger = logging.getLogger("jarvis.alarma")
 if not logger.handlers:  # al mismo jarvis.log que la voz (sin esto no quedaba rastro de la alarma)
@@ -206,7 +206,7 @@ def _guardar(t: datetime.datetime | None):
     if t is None:
         ARCHIVO.unlink(missing_ok=True)
     else:
-        ARCHIVO.write_text(json.dumps({"at": t.isoformat(timespec="minutes")}), encoding="utf-8")
+        ARCHIVO.write_text(json.dumps({"at": t.isoformat(timespec="seconds")}), encoding="utf-8")
 
 
 # --------------------------------------------------------------- comandos --
@@ -250,6 +250,16 @@ def _programar(t: datetime.datetime, respond):
     respond(_confirmacion(t))
 
 
+def _relativa(n: str) -> datetime.datetime | None:
+    """"despiertame en 20 minutos", "alarma dentro de una hora"."""
+    from .recordatorios import parse_duracion
+
+    d = parse_duracion(n)
+    if d and re.search(r"\b(?:en|dentro de|de aqui a)\s+$", n[: d[1][0]]):
+        return datetime.datetime.now() + d[0]
+    return None
+
+
 def handle(n: str, respond) -> bool:
     """n: minusculas sin tildes (como tv.handle)."""
     global _esperando_hora
@@ -281,7 +291,7 @@ def handle(n: str, respond) -> bool:
         respond(_sir(f"La alarma está a {hora_hablada(t)}") if t else _sir("No tiene ninguna alarma puesta"))
         return True
 
-    t = parse_hora(n)
+    t = parse_hora(n) or _relativa(n)
     if t is None:
         _esperando_hora = time.time()
         respond("¿A qué hora quiere la alarma, señor?")
@@ -346,6 +356,8 @@ class Despertador:
             if _estado is not None and time.time() - _sono_a > SONANDO_POR:
                 logger.info("Alarma: nadie la apagó en 30 min; la cámara vuelve a como estaba")
                 _terminar_sin_pausar()
+                avisos.avisar(f"⏰ La alarma sonó a las {datetime.datetime.fromtimestamp(_sono_a):%H:%M} "
+                              "y nadie la apagó en 30 minutos.")
             t = cargar()
             if t is None or datetime.datetime.now() < t:
                 continue
@@ -358,6 +370,7 @@ class Despertador:
             except Exception:
                 logger.exception("La alarma fallo")
                 _terminar_sin_pausar()
+                avisos.avisar("⚠ La alarma falló al sonar (ver logs/jarvis.log).")
                 self._respond(_sir("Buenos días. Es hora de levantarse"))
 
     def sonar(self):

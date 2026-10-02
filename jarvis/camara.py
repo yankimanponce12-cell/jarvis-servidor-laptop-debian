@@ -46,7 +46,9 @@ MANO = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (5, 9), 
         (9, 13), (13, 14), (14, 15), (15, 16), (13, 17), (17, 18), (18, 19), (19, 20), (0, 17)]
 AUSENTE_S = 120  # sin ver a nadie tanto tiempo = se fue
 LLEGADA_MIN_AUSENCIA_S = 120  # para saludar al volver tuvo que irse al menos esto
-PERSONA_CADA_S = 1.0
+PERSONA_CADA_S = 2.0  # EfficientDet: ~85 ms por pasada (medido 2026-10-02)
+FPS_REPOSO = 2  # sin movimiento un rato: menos cuadros (el calor frena a la IA en la grafica)
+REPOSO_TRAS_S = 10.0
 MOVIMIENTO_VENTANA_S = 3.0  # tras moverse algo, los gestos se siguen buscando este tiempo
 GESTO_CADA = 2  # gestos en uno de cada tantos cuadros (es lo mas caro: 47 ms)
 GESTO_CUADROS = 3  # de los ultimos 4 analizados, cuantos con el mismo gesto (~1.2 s)
@@ -130,6 +132,8 @@ class Camara:
         self._caras = _load_json(CARAS_FILE, {})  # nombre -> lista de firmas
         self._error = ""
         self.ventana = ventana_habilitada()  # mostrar la vista (se puede cambiar en caliente)
+        self._cuadro = None  # el ultimo cuadro (720p) para foto(); solo en memoria
+        self._cuadro_t = 0.0
 
     # ---------------------------------------------------------- control --
     @property
@@ -226,6 +230,19 @@ class Camara:
                 pass
         return len(firmas)
 
+    def foto(self, espera: float = 6.0) -> bytes | None:
+        """El cuadro mas reciente en JPEG (vigilancia y "foto" por Telegram).
+        Si la camara acaba de prender, espera hasta `espera` s al primer cuadro.
+        No se guarda en disco."""
+        fin = time.time() + espera
+        while time.time() < fin and self.activa and (self._cuadro is None or time.time() - self._cuadro_t > 2):
+            time.sleep(0.1)
+        if self._cuadro is None or time.time() - self._cuadro_t > 2:
+            return None
+        import cv2
+        ok, jpg = cv2.imencode(".jpg", self._cuadro, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return jpg.tobytes() if ok else None
+
     def olvidar_caras(self):
         self._caras = {}
         CARAS_FILE.unlink(missing_ok=True)
@@ -254,7 +271,6 @@ class Camara:
         prev_gray = None
         ultimo_mov = 0.0
         ultima_persona = 0.0
-        ultima_cara = 0.0
         gestos = deque(maxlen=4)
         disparado = None  # gesto ya avisado: no se repite hasta que se suelte
         sin_disparado = 0
@@ -271,6 +287,7 @@ class Camara:
                 if not ok:
                     time.sleep(0.5)
                     continue
+                self._cuadro, self._cuadro_t = frame, time.time()
                 small = frame if frame.shape[1] == ANCHO else cv2.resize(frame, (ANCHO, ALTO), interpolation=cv2.INTER_AREA)
                 ahora = time.time()
 
@@ -294,8 +311,6 @@ class Camara:
                 elif visto:
                     vista["persona"] = None
 
-                if cara is not None:
-                    ultima_cara = ahora
                 if visto:
                     self._ultima_vez = ahora
                     if not self._presente:
@@ -337,9 +352,11 @@ class Camara:
                     except Exception:
                         log.exception("camara: vista previa")
 
-                # gestos: solo si se vio una cara o algo se movio hace poco
+                # gestos: solo si algo se movio hace poco (para hacer un gesto hay que
+                # levantar la mano). Antes tambien con la cara a la vista, y con el
+                # usuario quieto frente a la PC corria sin parar (~32 ms por cuadro)
                 n_cuadro += 1
-                if ahora - max(ultimo_mov, ultima_cara) < MOVIMIENTO_VENTANA_S:
+                if ahora - ultimo_mov < MOVIMIENTO_VENTANA_S:
                     if n_cuadro % GESTO_CADA == 0:
                         r = self._gestos.recognize(self._mp_image(small))
                         g = GESTOS.get(r.gestures[0][0].category_name) if r.gestures else None
@@ -366,7 +383,8 @@ class Camara:
                     cv2.destroyWindow(VENTANA)
                     abierta = False
 
-                time.sleep(max(0.0, 1 / FPS - (time.time() - t0)))
+                fps = FPS if ahora - ultimo_mov < REPOSO_TRAS_S or self._aprendiendo is not None else FPS_REPOSO
+                time.sleep(max(0.0, 1 / fps - (time.time() - t0)))
         except Exception as exc:
             self._error = f"la cámara se detuvo ({exc})"
             log.exception("camara: hilo")

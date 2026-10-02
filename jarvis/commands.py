@@ -2,7 +2,8 @@ import datetime
 import random
 import re
 
-from . import actions, agent, alarma, brain, camara, chistes, demo, interrupt, memory, music, system, tv, weather, whatsapp
+from . import (actions, agent, alarma, brain, camara, chistes, demo, interrupt, memory, music, personalidad,
+               recordatorios, system, tv, vigilancia, weather, whatsapp)
 
 EXIT_WORDS = [
     "adios", "adios jarvis", "hasta luego", "cierra jarvis",
@@ -239,6 +240,18 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
 
     # el despertador: "alarma a las 6 de la manana" (alarma.py)
     if alarma.handle(t, respond):
+        return True
+
+    # recordatorios y temporizadores: "recuerdame sacar la ropa en 40 minutos"
+    if recordatorios.handle(t, text, respond):
+        return True
+
+    # modo vigilancia y "¿quien vino mientras no estaba?" (vigilancia.py)
+    if vigilancia.handle(t, respond):
+        return True
+
+    # "¿cuanto llevo jugando?", "sin comentarios" (personalidad.py)
+    if personalidad.handle(t, respond):
         return True
 
     # la tele de la sala y los modos musica/juego: antes que system, que si no

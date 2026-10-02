@@ -1,4 +1,5 @@
 import os
+import re
 import signal
 import sys
 import threading
@@ -17,7 +18,7 @@ from jarvis import server as jarvis_server
 from jarvis.commands import _is_affirmative, handle_command
 from jarvis.hud import Hud
 from jarvis.proactive import ProactiveSpeaker, greeting_for_time
-from jarvis import alarma
+from jarvis import alarma, avisos, personalidad, recordatorios, telegram, vigilancia
 
 _log = logging.getLogger("jarvis.alarma")  # mismo jarvis.log (ver alarma.py): pausas, gestos e interrupciones
 from jarvis.tui import JarvisApp
@@ -70,6 +71,7 @@ class Session:
         self._barge_at = 0.0  # cuando se interrumpio a Jarvis por ultima vez
         self._ask_pending = False  # lo ultimo que dijo Jarvis fue una pregunta sin contestar
         self._utt_ducked = False  # la frase en curso ya atenuo la musica (se oyo "Jarvis")
+        self._ultima_actividad = time.time()  # ultima orden del usuario (personalidad.py: ¿sigue despierto?)
 
     # ---- salida / entrada ------------------------------------------------
     def respond(self, msg: str, append: bool = False):
@@ -217,10 +219,21 @@ class Session:
             elif dato == "victoria":
                 hud.log("✌ Gesto: siguiente")
                 system.media("next")
-        elif tipo in ("salida", "llegada") and alarma.sonando():
-            _log.info(f"Cámara: {tipo} ignorada durante la alarma")  # no pausar ni saludar encima
-            return
-        elif tipo == "salida":
+        elif tipo in ("salida", "llegada"):
+            cam = camara.instancia
+            quien = dato if dato else (None if cam and cam.tiene_caras else "")
+            vigilancia.registrar(tipo, quien)  # "¿quien vino mientras no estaba?"
+            if alarma.sonando():
+                _log.info(f"Cámara: {tipo} ignorada durante la alarma")  # no pausar ni saludar encima
+                return
+            if tipo == "llegada" and vigilancia.en_llegada(quien, self.respond):
+                self._flush()
+                return
+            self._camara_salida_llegada(tipo, dato)
+
+    def _camara_salida_llegada(self, tipo: str, dato):
+        hud = self.hud
+        if tipo == "salida":
             self._camara_pauso = system.pause_all()
             hud.log("🚶 Saliste: " + ("pausé la música" if self._camara_pauso else "nadie a la vista"))
         elif tipo == "llegada":
@@ -272,8 +285,17 @@ class Session:
         # se crea siempre para que "prende la camara" funcione sin reiniciar
         self.camara = camara.Camara(self._on_camara)
         camara.instancia = self.camara
-        if camara.habilitada():
+        if camara.habilitada() or vigilancia.activa():
             self.camara.start()
+        recordatorios.Vigilante(self.respond, self._flush,
+                                presente=lambda: bool(self.camara and self.camara.activa and self.camara.presente)).start()
+        personalidad.Comentarista(self.respond, self._flush, lambda: self._ultima_actividad,
+                                  ocupado=lambda: self._busy).start()
+        avisos.MonitorBateria(self.respond).start()
+        self.telegram = telegram.Bot(self._remoto, self._remoto_especial, hud=hud)
+        self.telegram.start()
+        if not telegram.configurado():
+            hud.log("Telegram sin configurar: venv/bin/python -m jarvis.telegram configurar <TOKEN>", "dim")
         hud.set_state("inactivo")
         threading.Thread(target=self.respond, args=(greeting_for_time(),), daemon=True).start()
         self._flush()
@@ -356,6 +378,7 @@ class Session:
             return
 
         self.proactive.notify_activity()
+        self._ultima_actividad = time.time()
         self.hud.set_heard(text, final=True)
         if interrupt.is_stop_command(command):
             release()
@@ -384,6 +407,43 @@ class Session:
         finally:
             audio_focus.release()
 
+    # ---- Telegram (telegram.py) ------------------------------------------
+    def _remoto(self, text: str) -> list[str]:
+        """Un mensaje de Telegram: el mismo camino que una orden escrita, pero
+        las respuestas vuelven al celular en vez de decirse en voz alta."""
+        if not self._cmd_lock.acquire(timeout=90):
+            return ["Estoy ocupado con otra orden, señor. Intente en un momento."]
+        try:
+            out: list[str] = []
+            handle_command(text, respond=out.append, escuchar=None, hud=None)
+            return out
+        finally:
+            self._cmd_lock.release()
+
+    def _remoto_especial(self, text: str):
+        """"estado" / "¿está todo bien en casa?" y "foto": no pasan por commands.py."""
+        n = interrupt.normalize(text)
+        if re.search(r"^/?estado$|\b(?:todo bien|todo en orden|como esta la casa|como va la casa|que hay de nuevo)\b", n):
+            telegram.enviar(avisos.estado_casa())
+            return True
+        if re.search(r"^/?foto$|\b(?:manda(?:me)?|toma|tomame|enviame) (?:una )?foto\b|\bque (?:se ve|hay en el cuarto)\b", n):
+            cam = self.camara
+            if cam is None:
+                telegram.enviar("La cámara no está lista, señor.")
+                return True
+            prendi = not cam.activa
+            if prendi:
+                cam.start()
+            jpg = cam.foto(espera=25)
+            if prendi and not camara.habilitada() and not vigilancia.activa():
+                threading.Thread(target=cam.stop, daemon=True).start()
+            if jpg:
+                telegram.enviar_foto(jpg, f"El cuarto a las {time.strftime('%H:%M')}, señor.")
+            else:
+                telegram.enviar("No pude tomar la foto, señor" + (f": {cam.error}" if cam.error else "."))
+            return True
+        return None
+
     # ---- eventos de la interfaz -----------------------------------------
     def on_text(self, text: str):
         if interrupt.is_stop_command(text) and voice_output.is_speaking():
@@ -401,6 +461,7 @@ class Session:
             self.hud.set_heard(text, final=True)
             if self.proactive is not None:
                 self.proactive.notify_activity()
+            self._ultima_actividad = time.time()
             if not self._run_command(text, None):
                 self.quit()
 
