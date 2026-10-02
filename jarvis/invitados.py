@@ -12,8 +12,8 @@ Lo que SÍ puede un invitado:
   un historial aparte (no ve nada de lo que el dueño habla con Jarvis);
 - hora, fecha, clima y chistes;
 - pedir una FOTO del cuarto: al dueño le llega un mensaje con botones y, si
-  autoriza, el invitado puede ver la cámara durante PERMISO_MIN minutos. Cada
-  foto que ve se le avisa al dueño.
+  autoriza, el invitado puede ver la cámara durante PERMISO_MIN minutos. Al
+  dueño le llega una copia de cada foto que ve.
 Todo lo demás (tele, música, alarma, vigilancia, estado, recordatorios,
 memoria, WhatsApp, apps...) se le niega con amabilidad.
 
@@ -234,7 +234,9 @@ def _foto_para(chat_id: int) -> str | None:
     hora = datetime.datetime.now().strftime("%H:%M")
     quedan = int(permiso_restante(chat_id) // 60) + 1
     telegram.enviar_foto(jpg, f"El cuarto a las {hora}, señor. Puede ver la cámara {quedan} minutos más.", chat_id=chat_id)
-    telegram.enviar(f"📷 Tu {nombre(chat_id)} vio la cámara a las {hora} (le quedan {quedan} min de permiso).")
+    # al dueño, la MISMA foto que vio el invitado (no solo el aviso)
+    telegram.enviar_foto(jpg, f"📷 Esta foto le llegó a tu {nombre(chat_id)} a las {hora} "
+                              f"(le quedan {quedan} min de permiso).")
     log.info(f"Invitados: {nombre(chat_id)} vio la cámara")
     return None
 
