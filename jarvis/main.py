@@ -56,7 +56,6 @@ class Session:
         self.app = None
         self.proactive = None
         self.camara = None
-        self._camara_pauso = []  # lo que la camara pauso al irse el usuario (se reanuda al volver)
         self._booted_at = time.monotonic()
         # un solo comando a la vez: la voz, lo escrito y los avisos
         # proactivos comparten el mismo altavoz y el mismo historial de charla
@@ -237,16 +236,13 @@ class Session:
     def _camara_salida_llegada(self, tipo: str, dato):
         hud = self.hud
         if tipo == "salida":
-            self._camara_pauso = system.pause_all()
-            hud.log("🚶 Saliste: " + ("pausé la música" if self._camara_pauso else "nadie a la vista"))
+            # la música sigue (el usuario no quiere que se pause al dejar de verlo, 2026-10-02)
+            hud.log("🚶 No te veo desde hace 2 minutos")
         elif tipo == "llegada":
             if time.monotonic() - self._booted_at < 30:
                 return  # al arrancar ya saluda greeting_for_time()
             nombre = memory.get_name() if dato else ""
             hud.log("🙂 Llegaste" + (" (te reconocí)" if dato else ""))
-            if self._camara_pauso:
-                self._camara_pauso = []
-                system.resume()
             if dato or not camara.instancia or not camara.instancia.tiene_caras:
                 # con caras aprendidas, a un desconocido no se le saluda
                 self.respond(f"Bienvenido de vuelta, {nombre or 'señor'}.")

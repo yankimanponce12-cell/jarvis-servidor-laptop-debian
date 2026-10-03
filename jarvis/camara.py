@@ -44,7 +44,7 @@ ANCHO, ALTO = 320, 180
 MANO = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (5, 9), (9, 10), (10, 11), (11, 12),
         (9, 13), (13, 14), (14, 15), (15, 16), (13, 17), (17, 18), (18, 19), (19, 20), (0, 17)]
 AUSENTE_S = 120  # sin ver a nadie tanto tiempo = se fue
-LLEGADA_MIN_AUSENCIA_S = 120  # para saludar al volver tuvo que irse al menos esto
+LLEGADA_MIN_AUSENCIA_S = 0  # tras la "salida" (AUSENTE_S sin verlo), al volver a verlo siempre saluda
 PERSONA_CADA_S = 2.0  # EfficientDet: ~85 ms por pasada (medido 2026-10-02)
 FPS_REPOSO = 2  # sin movimiento un rato: menos cuadros (el calor frena a la IA en la grafica)
 REPOSO_TRAS_S = 10.0
