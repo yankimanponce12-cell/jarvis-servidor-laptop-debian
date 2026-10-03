@@ -295,7 +295,8 @@ def _request(payload: dict, timeout: float) -> tuple[dict, str | None]:
     return choice["message"], choice.get("finish_reason")
 
 
-def chat(messages: list, tools: list | None = None, max_tokens: int = 300, timeout: float = 60, slot: int = SLOT_CHAT) -> dict:
+def chat(messages: list, tools: list | None = None, max_tokens: int = 300, timeout: float = 60, slot: int = SLOT_CHAT,
+         temperature: float = 0.3) -> dict:
     """Una vuelta de chat. Devuelve el mensaje del asistente como dict
     ({"content": str, "tool_calls": [...]}). Lanza excepcion si el servidor
     no responde (los llamadores ya la atajan y responden algo generico)."""
@@ -303,7 +304,7 @@ def chat(messages: list, tools: list | None = None, max_tokens: int = 300, timeo
     payload = {
         "messages": messages,
         "max_tokens": max_tokens,
-        "temperature": 0.3,
+        "temperature": temperature,  # >0.3 solo en reintentos de charla (que no repita la misma respuesta)
         # A PROPOSITO sin top_k/top_p/repeat_penalty: probados (A/B, 40 pedidos
         # de herramientas) el muestreo "recomendado" de Qwen bajo el
         # tool-calling de 31/40 a 17/40 (escribe la accion como texto o se

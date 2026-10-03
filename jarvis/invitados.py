@@ -315,8 +315,33 @@ def _buscar(n: str) -> list[tuple[str, dict]]:
     return nombrados or (list(inv.items()) if len(inv) == 1 else [])
 
 
+_RECADO_DUENO = re.compile(
+    r"^(?:jarvis\W*)?(?:d[ií]le|d[ií]gale|m[aá]ndale|av[ií]sale|escr[ií]bele|coment[aá]le|p[aá]sale)\s+"
+    r"(?:(?:un|este|el)\s+(?:recado|mensaje)\s+)?a\s+(?:mi\s+)?([\wáéíóúñ]+)[\s,:]+(?:que\s+)?(.+?)\s*$", re.IGNORECASE)
+
+
+def recado_del_dueno(texto: str) -> str | None:
+    """"dile a mi novia que yo también" (por Telegram o por voz): se lo manda
+    al invitado tal cual. None si no nombra a un invitado (así "dile a mi mamá"
+    sigue yendo a WhatsApp)."""
+    m = _RECADO_DUENO.match(texto.strip())
+    if not m:
+        return None
+    quien, mensaje = _norm(m.group(1)), m.group(2).strip(" .")
+    destino = [(cid, d) for cid, d in _invitados().items() if _norm(d["nombre"]).split()[-1] == quien]
+    if not destino or not mensaje:
+        return None
+    for cid, d in destino:
+        telegram.enviar(f"💬 {_dueno()} le manda decir: «{mensaje}»", chat_id=int(cid))
+        log.info(f"Invitados: recado del dueño para {d['nombre']}")
+    return f"Listo, ya se lo mandé a tu {destino[0][1]['nombre']}."
+
+
 def comando_dueno(texto: str) -> str | None:
     """Administración de invitados. None si no era para esto."""
+    recado = recado_del_dueno(texto)
+    if recado:
+        return recado
     n = _norm(texto)
     if re.search(r"^(?:invitados|quien (?:mas )?tiene acceso|lista de invitados)$", n):
         inv = _invitados()
@@ -608,28 +633,57 @@ def _ejemplos() -> list:
 
 
 def _platicar(chat_id: int, texto: str) -> str:
-    from . import agent, llm
+    """Charla con la IA, con las reglas de charla.py: respuestas fijas para lo
+    social, y lo que escribe la IA sin arremedar, sin repetirse y sin inventar
+    nada del dueño."""
+    from . import agent, charla, llm
     hist = _historial.setdefault(chat_id, [])
+    recientes = [m["content"] for m in hist if m["role"] == "assistant"][-4:]
+    trato = "señorita" if es_novia(chat_id) else "señor"
+    rapida = charla.rapida(texto, trato, recientes)
+    if rapida:
+        hist += [{"role": "user", "content": texto}, {"role": "assistant", "content": rapida}]
+        del hist[:-HISTORIAL]
+        return rapida
+    from . import curiosidades
+    if charla.pide_contar(texto) or curiosidades.es_pedido(_norm(texto)):
+        dato = curiosidades.una(trato)  # datos reales de una lista: la IA los inventaba
+        hist += [{"role": "user", "content": texto}, {"role": "assistant", "content": dato}]
+        del hist[:-HISTORIAL]
+        return dato
+    pedido = texto
     hist.append({"role": "user", "content": texto})
     del hist[:-HISTORIAL]
     sistema = (_CHAT_PROMPT_NOVIA if es_novia(chat_id) else _CHAT_PROMPT).format(dueno=_dueno(), nombre=nombre(chat_id))
-    try:
-        ejemplos = [dict(m, content=adaptar(chat_id, m["content"])) for m in _ejemplos()]
-        r = llm.chat([{"role": "system", "content": sistema}] + ejemplos + hist, max_tokens=120, slot=llm.SLOT_CHAT)
+    sistema += " " + charla.REGLAS.format(dueno=_dueno())
+    ejemplos = [dict(m, content=adaptar(chat_id, m["content"])) for m in _ejemplos()]
+    mensajes = [{"role": "system", "content": sistema}] + ejemplos + hist[:-1] + [{"role": "user", "content": pedido}]
+    frases: list[str] = []
+    for intento in range(2):
+        try:
+            r = llm.chat(mensajes, max_tokens=120, slot=llm.SLOT_CHAT, temperature=0.3 if intento == 0 else 0.8)
+        except Exception:
+            hist.pop()
+            return _sir("Disculpe, ahorita no puedo platicar. Inténtelo en un momento")
         resp = re.sub(r"<think>.*?</think>", "", (r.get("content") or ""), flags=re.S).strip()
-    except Exception:
-        hist.pop()
-        return _sir("Disculpe, ahorita no puedo platicar. Inténtelo en un momento")
-    # el mismo pulido que la charla del dueño: de usted, sin preguntas de relleno ni "¿en qué le ayudo?"
-    frases = []
-    for f in llm.split_sentences(resp):
-        f = agent._pulir(adaptar(chat_id, f), any("señor" in x.lower() for x in frases))
-        if es_novia(chat_id) and any("señorita" in x.lower() for x in frases):  # "señorita" una vez por respuesta
-            f = re.sub(r",?\s*señorita\b", "", f, flags=re.IGNORECASE)
-        if f.strip(" .,!?¿¡"):
-            frases.append(f)
-    resp = " ".join(frases[:3])
-    resp = resp or _sir("Es un gusto platicar con usted")
+        for f in llm.split_sentences(resp):
+            f = agent._pulir(adaptar(chat_id, f), any("señor" in x.lower() for x in frases))
+            if es_novia(chat_id) and any("señorita" in x.lower() for x in frases):  # "señorita" una vez por respuesta
+                f = re.sub(r",?\s*señorita\b", "", f, flags=re.IGNORECASE)
+            f = charla.limpiar(f, texto, recientes, _dueno(), ya_pregunto=any(x.endswith("?") for x in frases))
+            if f.strip(" .,!?¿¡"):
+                frases.append(f)
+            if len(frases) == 3:
+                break
+        if frases:
+            break
+        # todo salió filtrado (arremedó, se repitió o inventó): otra vez, con aviso
+        # sin el historial: si lo ve, copia su respuesta anterior
+        aviso = "Contesta algo nuevo, corto y natural, sin repetir lo que te dijeron ni inventar nada."
+        if recientes:
+            aviso += f" Ya habías dicho: «{recientes[-1][:200]}». Di algo distinto."
+        mensajes = [mensajes[0], {"role": "system", "content": aviso}, mensajes[-1]]
+    resp = " ".join(frases) or adaptar(chat_id, charla.reaccion(texto, "señor", recientes))
     hist.append({"role": "assistant", "content": resp})
     return resp
 

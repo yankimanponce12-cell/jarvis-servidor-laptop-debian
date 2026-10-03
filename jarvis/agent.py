@@ -28,7 +28,7 @@ import inspect
 import json
 import re
 
-from jarvis import actions, llm, memory, weather, whatsapp
+from jarvis import actions, charla, llm, memory, weather, whatsapp
 
 MAX_TURNS = 8  # conversacion de corto plazo (se resetea con lobotomizar); lo de largo plazo vive en memory.py
 
@@ -66,7 +66,10 @@ LONG_SYSTEM_PROMPT = (
     "más interesante o útil y sin rodeos, y termina siempre la idea; nunca "
     "dejes una explicación a medias. Si pide varios puntos (por ejemplo tres "
     "consejos), dilos todos brevemente (primero, segundo, tercero). No "
-    "termines ofreciendo más ayuda."
+    "termines ofreciendo más ayuda. No sabes qué hizo el usuario, dónde estuvo ni lo que pasó hoy: nunca "
+    "lo inventes, ni inventes datos o anécdotas; si no sabes algo, dilo. "
+    "Tus gustos propios (eres una inteligencia artificial: no comes, no bebes ni duermes): el rock clásico, "
+    "sobre todo AC/DC; las películas de Iron Man; los datos curiosos y aprender cosas nuevas."
 )
 # En esta CPU la IA escribe ~8 tokens/s: 90 palabras eran 20-28 s de espera.
 # Con ~60 palabras son ~10 s; si igual se pasa, llm.chat recorta a la ultima frase completa
@@ -263,7 +266,7 @@ SOBRE_USUARIO_PROMPT = (
     "ingenioso, con humor seco y cariño. Le hablas de usted y le dices 'señor'. El usuario te pregunta "
     "algo SOBRE ÉL MISMO: contesta en una o dos oraciones hablando de ÉL (usted es..., usted tiene...), "
     "nunca de ti ni de lo que tú haces. Sin preguntas y sin ofrecer ayuda. No inventes su edad, su "
-    "aspecto ni datos que no sabes: habla de su forma de ser.\n"
+    "aspecto ni datos que no sabes, ni lo que hizo hoy o dónde estuvo: habla de su forma de ser.\n"
     "Lo que se nota de él: él mismo te construyó y te programa, juega en su PS5, se despierta con AC/DC "
     "y trasnocha seguido. {memoria}"
 )
@@ -287,6 +290,21 @@ def pregunta_sobre_usuario(text: str) -> bool:
     return bool(_SOBRE_MI.search(t) or _SOBRE_USUARIO.search(t.translate(_ACCENTS)))
 
 
+_EJEMPLOS_PROMPT = re.findall(r"-> Jarvis: ([^\n]+)", BASE_SYSTEM_PROMPT)
+
+
+def recientes(n: int = 4) -> list[str]:
+    """Lo último que dijo Jarvis en la charla (para no repetirse, charla.py)."""
+    return [m["content"] for m in _agent.messages if m["role"] == "assistant" and m.get("content")][-n:]
+
+
+def anotar(oyo: str, dijo: str):
+    """Una respuesta que no pasó por la IA (charla.rapida, curiosidades): va al
+    historial para que la IA sepa de qué se venía hablando."""
+    _agent.messages += [{"role": "user", "content": oyo}, {"role": "assistant", "content": dijo}]
+    _agent._trim_history()
+
+
 class _Emitter:
     """Filtra y entrega las frases de la respuesta. Con una interfaz que
     acepta respond(..., append=True) (la TUI de main.py) dice cada frase
@@ -294,9 +312,10 @@ class _Emitter:
     pruebas), las junta y finish() las entrega de una vez. En los dos casos
     descarta las frases que repiten lo que dijo el usuario."""
 
-    def __init__(self, respond, heard: str):
+    def __init__(self, respond, heard: str, recientes: list[str] | None = None):
         self._respond = respond
         self._heard = heard
+        self._recientes = recientes or []  # respuestas anteriores: no repetirlas (charla.limpiar)
         self.said: list[str] = []
         try:
             self._stream = "append" in inspect.signature(respond).parameters
@@ -307,6 +326,9 @@ class _Emitter:
         if _parrots(sentence, self._heard):
             return
         sentence = _pulir(sentence, any("señor" in s.lower() for s in self.said))
+        # sin repetir respuestas, sin "¿qué tal si le cuento...?" y sin inventar lo que hizo el usuario
+        sentence = charla.limpiar(sentence, self._heard, self._recientes,
+                                  ya_pregunto=any(s.rstrip().endswith("?") for s in self.said))
         if not sentence.strip(" .,!?¿¡"):
             return
         self.said.append(sentence)
@@ -331,8 +353,18 @@ class _Emitter:
             self._respond(self.text)
 
 
-_NO_PARROT = ("No repitas lo que dijo el usuario: contesta con tus propias palabras, de usted, con un "
-              "comentario propio; sin preguntas y sin ofrecer ayuda.")
+_NO_PARROT = ("No repitas lo que dijo el usuario ni lo que tú ya dijiste antes: contesta con tus propias "
+              "palabras y algo nuevo, de usted, con un comentario propio; sin preguntas y sin ofrecer ayuda.")
+
+
+def _reintento(full: list, emit: _Emitter) -> list:
+    """Mensajes para el segundo intento cuando todo se filtró: SIN el historial
+    (si lo ve, copia su respuesta anterior aunque la temperatura sea alta),
+    solo el prompt, lo último que se dijo y un aviso de no repetirlo."""
+    aviso = _NO_PARROT
+    if emit._recientes:
+        aviso += f" Ya habías dicho: «{emit._recientes[-1][:200]}». Di algo distinto."
+    return [full[0], {"role": "system", "content": aviso}, full[-1]]
 
 
 def _chat(messages, emit: _Emitter, tools=None):
@@ -343,8 +375,7 @@ def _chat(messages, emit: _Emitter, tools=None):
         return msg
     # no quedo nada (se fue al chino, o solo repitio al usuario): otro intento,
     # sin herramientas y pidiendo que no repita
-    retry = llm.chat(full[:-1] + [{"role": "system", "content": _NO_PARROT}, full[-1]], max_tokens=90,
-                     slot=llm.SLOT_AGENT)
+    retry = llm.chat(_reintento(full, emit), max_tokens=90, slot=llm.SLOT_AGENT, temperature=0.8)
     emit.feed(retry.get("content") or "")
     return {"content": emit.text}
 
@@ -355,8 +386,7 @@ def _converse(history: list, emit: _Emitter) -> str:
     llm.chat_stream(full, on_sentence=emit, max_tokens=LONG_MAX_TOKENS,
                     max_sentences=LONG_MAX_SENTENCES, slot=llm.SLOT_LONG)
     if not emit.said:
-        retry = llm.chat(full[:-1] + [{"role": "system", "content": _NO_PARROT}, full[-1]],
-                         max_tokens=LONG_MAX_TOKENS, slot=llm.SLOT_LONG)
+        retry = llm.chat(_reintento(full, emit), max_tokens=LONG_MAX_TOKENS, slot=llm.SLOT_LONG, temperature=0.8)
         emit.feed(retry.get("content") or "", n=LONG_MAX_SENTENCES)
     return emit.text
 
@@ -467,8 +497,9 @@ class Agent:
         """Punto de entrada: le pasa el texto al agente y deja que decida.
         Si algo falla (llama.cpp caido, respuesta rara), no lanza excepcion:
         cae a una respuesta generica, igual que hacia brain.ask()."""
+        # las frases de ejemplo del prompt cuentan como "ya dichas": el modelo las copiaba tal cual
+        emit = _Emitter(respond, text, recientes() + _EJEMPLOS_PROMPT)
         self.messages.append({"role": "user", "content": text})
-        emit = _Emitter(respond, text)
         if pregunta_sobre_usuario(text):
             try:
                 full = [{"role": "system", "content": _sobre_usuario_system()}] + _SOBRE_USUARIO_EJEMPLOS + self._plain_history()
@@ -488,7 +519,7 @@ class Agent:
                 self.messages.pop()
                 respond(_sir("No pude conectarme con mi modelo de IA local. Revise que llama.cpp esté corriendo"))
                 return
-            emit.finish(_sir("Entendido"))
+            emit.finish(charla.reaccion(text, "señor", recientes()) if text.strip().endswith("?") else _sir("Entendido"))
             self.messages.append({"role": "assistant", "content": emit.text})
             self._trim_history()
             return
@@ -501,7 +532,7 @@ class Agent:
 
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
-            emit.finish(_sir("Entendido"))
+            emit.finish(charla.reaccion(text, "señor", recientes()) if text.strip().endswith("?") else _sir("Entendido"))
             # a la historia solo va lo que se dijo: sin las frases que repetian al usuario
             self.messages.append({"role": "assistant", "content": emit.text})
             self._trim_history()

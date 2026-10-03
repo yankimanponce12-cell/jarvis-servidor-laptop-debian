@@ -2,7 +2,7 @@ import datetime
 import random
 import re
 
-from . import (actions, agent, alarma, brain, camara, chistes, demo, entrada, interrupt, memory, music, personalidad,
+from . import (actions, agent, alarma, brain, camara, charla, chistes, curiosidades, demo, entrada, interrupt, memory, music, personalidad,
                recordatorios, system, tv, vigilancia, weather, whatsapp)
 
 EXIT_WORDS = [
@@ -192,6 +192,13 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
         respond(random.choice(["Como guste, señor.", "Entendido, señor.", "De acuerdo, señor. Aquí estaré."]))
         return True
 
+    # "dile a mi novia que ya voy": recado para un invitado de Telegram (invitados.py)
+    from . import invitados
+    recado = invitados.recado_del_dueno(text)
+    if recado:
+        respond(recado.replace("tu ", "su ", 1).rstrip(".") + ", señor.")
+        return True
+
     # "Jarvis, ya llegue" + dos aplausos: la entrada de Iron Man (entrada.py)
     if entrada.handle(t, respond, hud):
         return True
@@ -199,6 +206,21 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
     rapida = _charla_rapida(t)
     if rapida:
         respond(rapida)
+        return True
+    # "¿cómo estás?", "bien", "jaja"...: frases fijas que no arremedan ni se repiten (charla.py)
+    recientes = agent.recientes()
+    rapida = charla.rapida(text, "señor", recientes, acks=False)
+    if rapida:
+        respond(rapida)
+        agent.anotar(text, rapida)
+        return True
+    # datos curiosos de una lista real: la IA los inventaba (curiosidades.py)
+    sigue_dato = bool(recientes) and recientes[-1] in curiosidades.dichas
+    if curiosidades.es_pedido(t) or re.fullmatch(r"(?:cuentame|platicame|dime) algo(?: interesante| curioso)?", charla.norm(re.sub(r"(?i)\bjarvis\b", "", text))) \
+            or (sigue_dato and charla.pide_contar(text)):
+        dato = curiosidades.una("señor")
+        respond(dato)
+        agent.anotar(text, dato)
         return True
 
     if _matches_any(t, EXIT_WORDS):
