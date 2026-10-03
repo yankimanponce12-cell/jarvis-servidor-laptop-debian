@@ -341,7 +341,7 @@ def comando_dueno(texto: str) -> str | None:
         return "\n\n".join(partes)[-telegram.MAX_TEXTO:]
     if "codigo" in n and "novia" in n:
         cfg = telegram._config()
-        m = re.search(r"\b(\d{6})\b", n)
+        m = re.search(r"\b(\d{4,10})\b", n)
         if m and re.search(r"^(?:cambia|pon|nuevo|establece)\b", n):
             cfg["codigo_novia"] = m.group(1)
             telegram._guardar(cfg)
@@ -356,7 +356,7 @@ def comando_dueno(texto: str) -> str | None:
         bot = telegram._api("getMe")["username"]
         return (f"El código de tu novia es {cfg['codigo_novia']}. Que abra t.me/{bot} en su Telegram, toque "
                 "«Iniciar» y mande ese número.")
-    m = re.search(r"\bcodigo\b.*?\b(\d{6})\b", n)
+    m = re.search(r"\bcodigo\b.*?\b(\d{4,10})\b", n)
     if m and re.search(r"^(?:cambia|pon|nuevo|establece)\b", n):
         cfg = telegram._config()
         cfg["codigo_invitado"] = m.group(1)
