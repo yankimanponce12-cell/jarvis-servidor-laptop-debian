@@ -72,7 +72,7 @@ def estado_casa() -> str:
     t = alarma.cargar()
     if t:
         partes.append(f"⏰ Alarma a {alarma.hora_hablada(t)}.")
-    pend = recordatorios.pendientes()
+    pend = recordatorios.del_dueno()
     if pend:
         partes.append(f"📝 {len(pend)} recordatorio(s); el próximo: {recordatorios.describir(pend[0])}.")
     ok = not extranos and (not bat or bat["percent"] > 15 or bat["state"] != "discharging")

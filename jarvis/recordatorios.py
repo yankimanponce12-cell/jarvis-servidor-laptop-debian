@@ -116,6 +116,15 @@ def pendientes() -> list[dict]:
         return sorted(_cargar(), key=lambda r: r["at"])
 
 
+def del_dueno() -> list[dict]:
+    """Los del dueño: sin los que un invitado se puso a sí mismo (llevan "para")."""
+    return [r for r in pendientes() if not r.get("para")]
+
+
+def de_invitado(chat_id: int) -> list[dict]:
+    return [r for r in pendientes() if r.get("para") == chat_id]
+
+
 def _cuando(r: dict) -> datetime.datetime:
     return datetime.datetime.fromisoformat(r["at"])
 
@@ -131,8 +140,10 @@ def describir(r: dict) -> str:
     return f"{r['texto'] or 'avisarle'} {cuando}" if r["texto"] else f"avisarle {cuando}"
 
 
-def _agregar(tipo: str, at: datetime.datetime, texto: str = "", dur: str = "") -> dict:
-    r = {"id": uuid.uuid4().hex[:8], "tipo": tipo, "at": at.isoformat(timespec="seconds"), "texto": texto, "dur": dur}
+def _agregar(tipo: str, at: datetime.datetime, texto: str = "", dur: str = "", **extra) -> dict:
+    """extra (invitados.py): para=<chat> (se le recuerda al invitado por Telegram)
+    o de=<nombre> (un invitado se lo pidió para el dueño)."""
+    r = {"id": uuid.uuid4().hex[:8], "tipo": tipo, "at": at.isoformat(timespec="seconds"), "texto": texto, "dur": dur, **extra}
     with _lock:
         items = _cargar()
         items.append(r)
@@ -177,7 +188,7 @@ def handle(t: str, text: str, respond) -> bool:
 
     # ---- cancelar
     if re.search(r"\b(?:cancela|cancelalo|cancelala|quita|quitalo|borra|borralo|elimina|deten|para|apaga)\b", t) and not pide_rec:
-        items = pendientes()
+        items = del_dueno()
         if tempo:
             quitar = [r for r in items if r["tipo"] == "temporizador"]
             nombre = "temporizador"
@@ -197,7 +208,7 @@ def handle(t: str, text: str, respond) -> bool:
     # ---- consultar
     if not pide_rec and re.search(r"\b(?:cuanto|cuantos|cuantas|que|cuales|tengo|hay|falta|queda|quedan|lleva)\b", t) \
             and not (tempo and parse_duracion(t)):
-        items = [r for r in pendientes() if r["tipo"] == "temporizador"] if tempo else pendientes()
+        items = [r for r in del_dueno() if r["tipo"] == "temporizador"] if tempo else del_dueno()
         if not items:
             respond(_sir("No tiene ningún temporizador activo" if tempo else "No tiene recordatorios pendientes"))
         elif len(items) == 1:
@@ -286,6 +297,13 @@ class Vigilante:
                     log.exception("Recordatorio fallo")
 
     def _sonar(self, r: dict):
+        if r.get("para"):  # se lo puso un invitado: le llega a él por Telegram, no se dice en la casa
+            from . import invitados, telegram
+            sep = " " if r["texto"].lower().startswith("que ") else ": "
+            telegram.enviar(f"⏰ Le recuerdo{sep}{r['texto']}, señor." if r["texto"] else
+                            "⏰ Me pidió que le avisara a esta hora, señor.", chat_id=r["para"])
+            log.info(f"Recordatorio para el invitado {invitados.nombre(r['para'])}: {r['texto']!r}")
+            return
         if r["tipo"] == "temporizador":
             msg = random.choice([f"Señor, terminó el temporizador de {r['dur']}.",
                                  f"Pasaron los {r['dur']}, señor.", f"Tiempo, señor. Se cumplieron los {r['dur']}."])
@@ -294,6 +312,10 @@ class Vigilante:
         else:
             sep = " " if r["texto"].lower().startswith("que ") else ": "
             msg = f"Señor, le recuerdo{sep}{r['texto']}." if r["texto"] else "Señor, me pidió que le avisara a esta hora."
+            if r.get("de"):
+                # lo escribió ella en primera persona ("que me llame"): va citado
+                msg = (f"Señor, su {r['de']} le dejó un recordatorio: {r['texto']}." if r["texto"]
+                       else f"Señor, su {r['de']} me pidió que le avisara a esta hora.")
             avisos.avisar("📝 " + msg)
         log.info(f"Sonando {r['tipo']}: {r['texto'] or r['dur']!r}")
         self._respond(msg)

@@ -25,6 +25,15 @@ llegan al dueño a su Telegram tal cual los escribió el invitado.
 Cada conversación (lo que manda el invitado y lo que Jarvis le contesta, texto,
 audio o foto) se guarda en logs/invitados/<chat>.log (logs/ no va a git).
 
+La NOVIA del dueño (perfil "novia", entra con su propio código fijo,
+telegram_config.json "codigo_novia"): se le dice "señorita" (adaptar(), lo
+aplica telegram.py a todo lo que se le manda) y además de lo anterior puede
+ponerse recordatorios ("recuérdame X a las 8": le llegan por Telegram) y
+ponérselos al dueño ("recuérdale a Yair X en una hora": Jarvis se lo dice en
+la casa y por Telegram). Fotos: UNA por pedido, y el dueño la ve primero: le
+llega con ✅/❌ y solo si la aprueba se le manda a ella (nunca permiso por
+tiempo).
+
 Comandos del dueño (por Telegram): "invita a mi papá", "invitados", "quita a
 mi papá", "dale permiso a mi papá 30 minutos", "quítale el permiso a mi papá",
 "conversación de mi papá"."""
@@ -46,6 +55,7 @@ CODIGO_INTENTOS = 5
 INTENTOS_CHAT = 5  # códigos mal desde un mismo chat = bloqueado
 FALLOS_HORA = 15  # fallos en una hora entre todos = el código fijo se pausa una hora
 NOMBRE_FIJO = "papá"  # con el código fijo entra el papá
+NOMBRE_NOVIA = "novia"  # con "codigo_novia" entra la novia (perfil "novia")
 PERMISO_MIN = 30
 MAX_MENSAJES_MIN = 8  # un invitado no puede mandar más que esto por minuto
 REPETIR_PEDIDO_S = 120  # tras un "no", el invitado no puede volver a pedir foto en este rato
@@ -57,6 +67,7 @@ _lock = threading.Lock()
 _codigo: dict = {}  # {"codigo", "nombre", "hasta", "intentos"}
 _pedidos: dict[int, float] = {}  # invitado -> cuando pidió foto (esperando al dueño)
 _negado: dict[int, float] = {}  # invitado -> cuando el dueño dijo que no
+_fotos_novia: dict[int, bytes] = {}  # novia -> la foto que el dueño tiene que aprobar
 _historial: dict[int, list] = {}
 _ritmo: dict[int, deque] = {}
 _intentos: dict[int, int] = {}  # chat desconocido -> códigos mal
@@ -93,8 +104,36 @@ _CHAT_PROMPT = (
 )
 
 
+_CHAT_PROMPT_NOVIA = (
+    "Eres Jarvis, el asistente de voz que {dueno} se construyó, al estilo del JARVIS de Iron Man: elegante, "
+    "caballeroso, cálido y con un toque de humor seco. Hablas en español de México, de usted, y le dices "
+    "'señorita'. Ahora te escribe la novia de {dueno}. Trátala con mucho respeto y simpatía, sin coquetear. "
+    "Contesta en una o dos oraciones, sin markdown. No hablas de la vida privada de {dueno} ni de lo que hace: "
+    "si te preguntan, di con gracia que eso es confidencial y que se lo pregunte a él. No puedes hacer acciones "
+    "de la casa (ni la tele, ni la música): solo conversar. Nunca inventes que hiciste algo."
+)
+
+
 def _sir(msg: str) -> str:
-    return f"{msg.rstrip('.')}, señor."
+    return f"{msg.rstrip('.')}, señor."  # a la novia, adaptar() lo vuelve "señorita"
+
+
+def es_novia(chat_id: int) -> bool:
+    d = _invitados().get(str(chat_id), {})
+    return d.get("perfil") == "novia" or _norm(d.get("nombre", "")) == NOMBRE_NOVIA
+
+
+def adaptar(chat_id: int, texto: str) -> str:
+    """Lo que se le manda a la novia: "señorita" en vez de "señor" (y en femenino
+    lo que Jarvis dice de ella). Al resto de los invitados, igual."""
+    if not es_novia(chat_id):
+        return texto
+    texto = re.sub(r"\bseñor\b", "señorita", texto)
+    texto = re.sub(r"\bSeñor\b", "Señorita", texto)
+    for m, f in (("Bienvenido", "Bienvenida"), ("bienvenido", "bienvenida"), ("lo autorizó", "la autorizó"),
+                 ("No lo reconozco", "No la reconozco"), ("atenderle", "atenderla")):
+        texto = texto.replace(m, f)
+    return texto
 
 
 def _norm(t: str) -> str:
@@ -104,7 +143,9 @@ def _norm(t: str) -> str:
 def _dueno() -> str:
     try:
         from . import memory
-        return memory.get_name() or "Yair"
+        completo = memory.get_name() or "Yair"
+        # en la memoria está el nombre completo ("Aarón Yair Ponce"): le dicen Yair
+        return "Yair" if "yair" in completo.lower() else completo.split()[0]
     except Exception:
         return "Yair"
 
@@ -182,9 +223,18 @@ def _registrar(chat_id: int, quien: str, nombre_tg: str):
         quien = f"invitado {nombre_tg or chat_id}"  # ya hay un "papá": el segundo no se llama igual
     inv[str(chat_id)] = {"nombre": quien, "telegram": nombre_tg,
                          "desde": datetime.datetime.now().isoformat(timespec="seconds"), "foto_hasta": 0}
+    if _norm(quien) == NOMBRE_NOVIA:
+        inv[str(chat_id)]["perfil"] = "novia"
     _guardar_invitados(inv)
     _intentos.pop(chat_id, None)
     log.info(f"Invitados: registrado {quien} ({nombre_tg}, chat {chat_id})")
+    if es_novia(chat_id):
+        telegram.enviar(f"💕 Entró tu novia: {nombre_tg or 'sin nombre'}. Puede platicar, pedir el clima, mandarte "
+                        "recados y recordatorios, y pedir fotos que primero ves y apruebas tú. Su chat: «conversación "
+                        f"de mi novia». Si no es ella: «quita a {quien}».")
+        telegram.enviar(f"Mucho gusto, señorita. Soy Jarvis, el asistente que construyó {_dueno()}. Es un honor "
+                        "atenderla.\n\n" + _ayuda_novia(), chat_id=chat_id)
+        return
     telegram.enviar(f"✅ Entró con el código: {nombre_tg or 'sin nombre'} (quedó como «{quien}»). Puede platicar y "
                     f"pedir fotos, que tú autorizas. Si no es quien esperabas: «quita a {quien}».")
     telegram.enviar(f"Mucho gusto, señor. Soy Jarvis, el asistente que construyó {_dueno()}. Puede platicar "
@@ -208,8 +258,14 @@ def registrar_si_codigo(chat_id: int, texto: str, nombre_tg: str) -> bool:
     pausado, quien, quedan = False, None, 0
     with _lock:
         fijo = telegram._config().get("codigo_invitado")
+        fijo_novia = telegram._config().get("codigo_novia")
         temporal = _codigo if _codigo and ahora <= _codigo["hasta"] else None
-        if fijo and digitos == fijo:
+        if fijo_novia and digitos == fijo_novia:
+            if ahora < _pausado_hasta:
+                pausado = True
+            else:
+                quien = NOMBRE_NOVIA
+        elif fijo and digitos == fijo:
             if ahora < _pausado_hasta:
                 pausado = True  # código bueno, pero en pausa por demasiados fallos
             else:
@@ -283,6 +339,23 @@ def comando_dueno(texto: str) -> str | None:
             partes.append(f"🗨 Conversación con tu {d['nombre']} (últimos {len(lineas)} mensajes):\n"
                           + ("\n".join(l[11:] for l in lineas) if lineas else "(todavía no hay nada)"))
         return "\n\n".join(partes)[-telegram.MAX_TEXTO:]
+    if "codigo" in n and "novia" in n:
+        cfg = telegram._config()
+        m = re.search(r"\b(\d{6})\b", n)
+        if m and re.search(r"^(?:cambia|pon|nuevo|establece)\b", n):
+            cfg["codigo_novia"] = m.group(1)
+            telegram._guardar(cfg)
+            return f"Listo, el código de tu novia ahora es {m.group(1)}."
+        if re.search(r"^(?:desactiva|quita|borra|apaga)\b", n):
+            cfg.pop("codigo_novia", None)
+            telegram._guardar(cfg)
+            return "Desactivé el código de tu novia (si ya entró, sigue entrando)."
+        if not cfg.get("codigo_novia"):
+            cfg["codigo_novia"] = f"{random.SystemRandom().randrange(10**6):06d}"
+            telegram._guardar(cfg)
+        bot = telegram._api("getMe")["username"]
+        return (f"El código de tu novia es {cfg['codigo_novia']}. Que abra t.me/{bot} en su Telegram, toque "
+                "«Iniciar» y mande ese número.")
     m = re.search(r"\bcodigo\b.*?\b(\d{6})\b", n)
     if m and re.search(r"^(?:cambia|pon|nuevo|establece)\b", n):
         cfg = telegram._config()
@@ -336,6 +409,10 @@ def comando_dueno(texto: str) -> str | None:
                 _quitar_permiso(int(cid))
                 telegram.enviar("Ya no tiene permiso de ver la cámara, señor.", chat_id=int(cid))
             return "Listo, ya no puede ver la cámara."
+        if all(es_novia(int(cid)) for cid, _ in objetivo):
+            return ("A tu novia no le doy permiso por tiempo: cada foto que pida te llega a ti primero "
+                    "y solo se la mando si la apruebas.")
+        objetivo = [(cid, d) for cid, d in objetivo if not es_novia(int(cid))]
         from .recordatorios import parse_duracion
         d = parse_duracion(n)
         minutos = d[0].total_seconds() / 60 if d else PERMISO_MIN
@@ -377,8 +454,117 @@ def _pedir_permiso(chat_id: int) -> str:
     return _sir(f"Le pedí permiso a {_dueno()}. En cuanto lo autorice le mando la foto")
 
 
+# ------------------------------------------------------------------ novia --
+def _ayuda_novia() -> str:
+    d = _dueno()
+    return ("Esto es lo que puedo hacer por usted, señorita:\n"
+            "💬 Platicar: escríbame (o mándeme un audio) lo que guste.\n"
+            "🌤 Clima: «¿qué clima hace?», «¿va a llover mañana?»\n"
+            "🕐 Hora y fecha: «¿qué hora es?», «¿qué día es hoy?»\n"
+            f"📷 Foto del cuarto: «foto». {d} la ve primero y, si la aprueba, se la mando (una por vez).\n"
+            f"✉ Recados: «dile a {d} que lo extraño» y le llega al instante.\n"
+            "⏰ Recordatorios para usted: «recuérdame tomar agua en 30 minutos», «recuérdame a las 8 llamar a mi mamá».\n"
+            f"⏰ Recordatorios para {d}: «recuérdale a {d} que me llame a las 9», «recuérdale a {d} comer en una hora».\n"
+            "📋 «mis recordatorios» para verlos y «cancela mis recordatorios» para borrarlos.\n"
+            "😄 Chistes: «cuéntame un chiste».\n"
+            "❓ «ayuda»: esta lista.")
+
+
+def _foto_novia(chat_id: int) -> str:
+    """Toma la foto y se la manda al DUEÑO para que la apruebe; a ella le llega
+    solo si él toca ✅ (callback "fnov:si")."""
+    if chat_id in _fotos_novia:
+        return _sir(f"Ya le mandé la foto a {_dueno()} para que la apruebe. En cuanto conteste se la envío")
+    if time.time() - _negado.get(chat_id, 0) < REPETIR_PEDIDO_S:
+        return _sir(f"{_dueno()} acaba de decir que no. Inténtelo más tarde")
+    from . import vigilancia
+    jpg, error = vigilancia.foto_del_cuarto()
+    if not jpg:
+        return _sir(f"No pude tomar la foto: {error}")
+    _fotos_novia[chat_id] = jpg
+    telegram.enviar_foto(jpg, f"📷 Tu novia pidió una foto del cuarto ({datetime.datetime.now():%H:%M}). "
+                              "Esta es la que le mandaría:")
+    telegram.enviar("¿Se la mando?", botones=[[("✅ Sí, mándasela", f"fnov:si:{chat_id}"), ("❌ No", f"fnov:no:{chat_id}")]])
+    log.info(f"Invitados: la novia pidió una foto; esperando al dueño")
+    return _sir(f"Tomé la foto y se la pasé a {_dueno()} para que la apruebe. En cuanto diga que sí, se la mando")
+
+
+def _callback_novia(cid: int, si: bool, callback_id: str, mensaje: dict):
+    jpg = _fotos_novia.pop(cid, None)
+    if jpg is None or not es_invitado(cid):
+        telegram.responder_boton(callback_id, "Esa foto ya no está pendiente")
+        return
+    if si:
+        telegram.responder_boton(callback_id, "Enviada")
+        telegram.editar(mensaje, "✅ Le mandé la foto a tu novia.")
+        telegram.enviar_foto(jpg, f"Aquí tiene, señorita: el cuarto a las {datetime.datetime.now():%H:%M}. "
+                                  f"{_dueno()} la aprobó.", chat_id=cid)
+    else:
+        _negado[cid] = time.time()
+        telegram.responder_boton(callback_id, "No se la mando")
+        telegram.editar(mensaje, "❌ No le mandé la foto a tu novia.")
+        telegram.enviar(f"{_dueno()} prefirió no mandar la foto esta vez, señorita.", chat_id=cid)
+    log.info(f"Invitados: el dueño {'aprobó' if si else 'negó'} la foto de la novia")
+
+
+_PARA_DUENO = r"^(?:oye |jarvis )?(?:recuerdale|recuerdele|recordarle|avisale|avisele)\b"
+_PARA_MI = r"\b(?:recuerdame|recordarme|recuerdeme|me recuerdas|me recuerdes|avisame|aviseme|me avisas|me avises)\b"
+
+
+def _recordatorio_novia(chat_id: int, texto: str, n: str) -> str | None:
+    """Recordatorios de la novia: para ella (le llegan por Telegram) o para el
+    dueño (Jarvis se los dice en la casa). None si no era un recordatorio con
+    hora (un "recuérdale a Yair que..." sin hora es un recado)."""
+    from . import recordatorios as rec
+    from .alarma import hora_hablada, parse_hora
+    if re.search(r"^(?:mis|que|cuales|ver|tengo)\b.*\brecordatorios?\b|^recordatorios$", n):
+        mios = rec.de_invitado(chat_id)
+        if not mios:
+            return _sir("No tiene recordatorios pendientes")
+        return _sir("Sus recordatorios: " + "; ".join(rec.describir(r) for r in mios[:5]))
+    if re.search(r"\b(?:cancela|borra|quita|elimina)\b.*\brecordatorios?\b", n):
+        mios = rec.de_invitado(chat_id)
+        rec._quitar({r["id"] for r in mios})
+        return _sir(f"Listo, borré {len(mios)} recordatorio{'s' if len(mios) != 1 else ''}" if mios
+                    else "No tenía recordatorios pendientes")
+    para_dueno = bool(re.search(_PARA_DUENO, n))
+    if not (para_dueno or re.search(_PARA_MI, n)):
+        return None
+    # "recuérdale a Yair ..." -> se quita el destinatario y queda como "recuérdame ..." para el parser
+    t = n
+    if para_dueno:
+        t = re.sub(_PARA_DUENO + r"(?:\s+a\s+(?:yair|el|mi novio|tu jefe|tu dueno|tu creador)\b)?", "recuerdame", t)
+    ahora = datetime.datetime.now()
+    d = rec.parse_duracion(t)
+    if d and re.search(r"\b(?:en|dentro de|de aqui a)\s+(?:\S+\s+){0,3}$", t[: d[1][0]] + " "):
+        at = ahora + d[0]
+        pre = re.search(r"(?:\b(?:en|dentro de|de aqui a)\s+)$", t[: d[1][0]])
+        quitar = [(pre.start() if pre else d[1][0], d[1][1])]
+        cuando = f"en {rec.duracion_hablada(d[0])}"
+    else:
+        at = parse_hora(t)
+        if at is None:
+            if para_dueno:
+                return None  # sin hora: es un recado
+            return _sir("¿Cuándo se lo recuerdo? Por ejemplo: en 20 minutos, o a las 8")
+        m = re.search(r"\b(?:a las?|para las?)\s+\S+(?:\s+(?:y|menos)\s+\S+)?(?:\s+(?:de la (?:manana|tarde|noche|madrugada)|am|pm))?", t)
+        quitar = [m.span()] if m else []
+        cuando = f"a {hora_hablada(at)}"
+    que = rec._texto_recordatorio(t, t, quitar)
+    if para_dueno:
+        rec._agregar("recordatorio", at, texto=que, de=nombre(chat_id))
+        telegram.enviar(f"⏰ Tu {nombre(chat_id)} te dejó un recordatorio ({cuando}): «{que or 'avisarte'}».")
+        return _sir(f"Listo. Se lo recordaré a {_dueno()} {cuando}" + (f": {que}" if que else ""))
+    rec._agregar("recordatorio", at, texto=que, para=chat_id)
+    return _sir(f"Anotado: le recordaré {que} {cuando}" if que else f"Le aviso {cuando}")
+
+
 def callback(data: str, callback_id: str, mensaje: dict) -> bool:
-    """Botones del dueño ("foto:si:<chat>" / "foto:no:<chat>")."""
+    """Botones del dueño ("foto:si:<chat>" / "foto:no:<chat>"; "fnov:..." la foto de la novia)."""
+    m = re.fullmatch(r"fnov:(si|no):(-?\d+)", data or "")
+    if m:
+        _callback_novia(int(m.group(2)), m.group(1) == "si", callback_id, mensaje)
+        return True
     m = re.fullmatch(r"foto:(si|no):(-?\d+)", data or "")
     if not m:
         return False
@@ -426,9 +612,10 @@ def _platicar(chat_id: int, texto: str) -> str:
     hist = _historial.setdefault(chat_id, [])
     hist.append({"role": "user", "content": texto})
     del hist[:-HISTORIAL]
-    sistema = _CHAT_PROMPT.format(dueno=_dueno(), nombre=nombre(chat_id))
+    sistema = (_CHAT_PROMPT_NOVIA if es_novia(chat_id) else _CHAT_PROMPT).format(dueno=_dueno(), nombre=nombre(chat_id))
     try:
-        r = llm.chat([{"role": "system", "content": sistema}] + _ejemplos() + hist, max_tokens=120, slot=llm.SLOT_CHAT)
+        ejemplos = [dict(m, content=adaptar(chat_id, m["content"])) for m in _ejemplos()]
+        r = llm.chat([{"role": "system", "content": sistema}] + ejemplos + hist, max_tokens=120, slot=llm.SLOT_CHAT)
         resp = re.sub(r"<think>.*?</think>", "", (r.get("content") or ""), flags=re.S).strip()
     except Exception:
         hist.pop()
@@ -436,7 +623,9 @@ def _platicar(chat_id: int, texto: str) -> str:
     # el mismo pulido que la charla del dueño: de usted, sin preguntas de relleno ni "¿en qué le ayudo?"
     frases = []
     for f in llm.split_sentences(resp):
-        f = agent._pulir(f, any("señor" in x.lower() for x in frases))
+        f = agent._pulir(adaptar(chat_id, f), any("señor" in x.lower() for x in frases))
+        if es_novia(chat_id) and any("señorita" in x.lower() for x in frases):  # "señorita" una vez por respuesta
+            f = re.sub(r",?\s*señorita\b", "", f, flags=re.IGNORECASE)
         if f.strip(" .,!?¿¡"):
             frases.append(f)
     resp = " ".join(frases[:3])
@@ -448,12 +637,26 @@ def _platicar(chat_id: int, texto: str) -> str:
 def atender(chat_id: int, texto: str) -> str | None:
     """Mensaje de un invitado. Devuelve la respuesta (texto) o None si ya se
     mandó algo (la foto)."""
+    resp = _atender(chat_id, texto)
+    return adaptar(chat_id, resp) if resp else resp
+
+
+def _atender(chat_id: int, texto: str) -> str | None:
     ritmo = _ritmo.setdefault(chat_id, deque(maxlen=MAX_MENSAJES_MIN))
     if len(ritmo) == MAX_MENSAJES_MIN and time.time() - ritmo[0] < 60:
         return _sir("Vamos más despacio, por favor. Espere un minuto")
     ritmo.append(time.time())
     n = _norm(texto)
     log.info(f"Invitados: {nombre(chat_id)}: {texto!r}")
+    if es_novia(chat_id):
+        if n in ("start", "ayuda", "help", "comandos", "que puedes hacer", "que haces", "que sabes hacer",
+                 "para que sirves", "menu"):
+            return _ayuda_novia()
+        r = _recordatorio_novia(chat_id, texto, n)
+        if r:
+            return r
+        if re.search(_FOTO, n):
+            return _foto_novia(chat_id)
     if re.search(_RECADO, n):
         telegram.enviar(f"💬 Recado de tu {nombre(chat_id)}: «{texto.strip()}»")
         log.info(f"Invitados: recado de {nombre(chat_id)} para el dueño")

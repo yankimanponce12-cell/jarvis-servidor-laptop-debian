@@ -163,6 +163,7 @@ def enviar(texto: str, chat_id: int | None = None, botones: list | None = None) 
     (texto, dato) que vuelven como callback_query. False si falló."""
     if not configurado():
         return False
+    texto = _trato(chat_id, texto)
     datos = {"chat_id": chat_id or _config()["chat_id"], "text": texto[:MAX_TEXTO]}
     if botones:
         datos["reply_markup"] = json.dumps({"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in fila]
@@ -174,6 +175,17 @@ def enviar(texto: str, chat_id: int | None = None, botones: list | None = None) 
     except Exception as exc:
         log.warning(f"Telegram: no pude mandar el mensaje ({exc})")
         return False
+
+
+def _trato(chat_id: int | None, texto: str) -> str:
+    """A la novia del dueño se le dice "señorita" (invitados.adaptar)."""
+    if not chat_id or chat_id == _config().get("chat_id"):
+        return texto
+    try:
+        from . import invitados
+        return invitados.adaptar(chat_id, texto)
+    except Exception:
+        return texto
 
 
 def _a_invitado(chat_id: int | None, texto: str):
@@ -207,6 +219,7 @@ def responder_boton(callback_id: str, texto: str = ""):
 def enviar_foto(jpg: bytes, texto: str = "", chat_id: int | None = None) -> bool:
     if not configurado():
         return False
+    texto = _trato(chat_id, texto)
     try:
         _api("sendPhoto", timeout=60, data={"chat_id": chat_id or _config()["chat_id"], "caption": texto[:1000]},
              files={"photo": ("camara.jpg", jpg, "image/jpeg")})
@@ -421,6 +434,7 @@ class Bot:
                 self._contestar(resp, por_voz, texto if por_voz else "", chat_id=chat_id)
 
     def _contestar(self, texto: str, por_voz: bool, entendi: str = "", chat_id: int | None = None):
+        texto = _trato(chat_id, texto)  # tambien lo que se dice en la nota de voz
         if por_voz and self._sintetizar is not None:
             try:
                 wav = self._sintetizar(para_decir(texto))
