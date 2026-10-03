@@ -2,7 +2,7 @@ import datetime
 import random
 import re
 
-from . import (actions, agent, alarma, brain, camara, chistes, demo, interrupt, memory, music, personalidad,
+from . import (actions, agent, alarma, brain, camara, chistes, demo, entrada, interrupt, memory, music, personalidad,
                recordatorios, system, tv, vigilancia, weather, whatsapp)
 
 EXIT_WORDS = [
@@ -190,6 +190,10 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
     # Si iba a la IA, contestaba con otra oferta/pregunta y se armaba un bucle.
     if _es_rechazo(t):
         respond(random.choice(["Como guste, señor.", "Entendido, señor.", "De acuerdo, señor. Aquí estaré."]))
+        return True
+
+    # "Jarvis, ya llegue" + dos aplausos: la entrada de Iron Man (entrada.py)
+    if entrada.handle(t, respond, hud):
         return True
 
     rapida = _charla_rapida(t)

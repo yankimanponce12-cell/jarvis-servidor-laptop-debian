@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
-from jarvis import mic_config, stt_gpu, wakeword
+from jarvis import aplausos, mic_config, stt_gpu, wakeword
 
 SAMPLE_RATE = 16000
 FRAME = 512  # muestras por trama de audio (32 ms): el tamaño que exige el VAD Silero a 16 kHz
@@ -517,6 +517,7 @@ class VoiceListener:
         def callback(indata, frames, time_info, status):
             frame = indata[:, 0].copy()
             mic_config.report_level(float(np.sqrt(np.mean(frame**2))))  # medidor de la interfaz
+            aplausos.alimentar(frame)  # "ya llegue" + dos aplausos (entrada.py)
             q.put(frame)
 
         return sd.InputStream(

@@ -18,7 +18,7 @@ from jarvis import server as jarvis_server
 from jarvis.commands import _is_affirmative, handle_command
 from jarvis.hud import Hud
 from jarvis.proactive import ProactiveSpeaker, greeting_for_time
-from jarvis import alarma, avisos, personalidad, recordatorios, telegram, vigilancia
+from jarvis import alarma, avisos, entrada, personalidad, recordatorios, telegram, vigilancia
 
 _log = logging.getLogger("jarvis.alarma")  # mismo jarvis.log (ver alarma.py): pausas, gestos e interrupciones
 from jarvis.tui import JarvisApp
@@ -225,6 +225,9 @@ class Session:
             vigilancia.registrar(tipo, quien)  # "¿quien vino mientras no estaba?"
             if alarma.sonando():
                 _log.info(f"Cámara: {tipo} ignorada durante la alarma")  # no pausar ni saludar encima
+                return
+            if tipo == "llegada" and entrada.reciente():
+                _log.info("Cámara: llegada durante la entrada de «ya llegué», sin otro saludo")
                 return
             if tipo == "llegada" and vigilancia.en_llegada(quien, self.respond):
                 self._flush()
