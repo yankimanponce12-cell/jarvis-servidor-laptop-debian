@@ -424,15 +424,69 @@ def _desktop_state() -> tuple[str, str, dict]:
     return status, trackid, {"title": title, "artists": [a.strip() for a in artist.split(",") if a.strip()]}
 
 
+def _spotify_inputs() -> list[str]:
+    """Streams de audio (sink-inputs de PipeWire) de la app de escritorio."""
+    out = subprocess.run(["pactl", "list", "sink-inputs"], capture_output=True, text=True).stdout
+    ids, actual = [], None
+    for line in out.splitlines():
+        m = re.match(r"Sink Input #(\d+)", line)
+        if m:
+            actual = m.group(1)
+        elif actual and re.search(r'application\.name = "spotify"', line, re.IGNORECASE):
+            ids.append(actual)
+    return ids
+
+
+def _mute_spotify(mute: bool, ids: list[str] | None = None) -> list[str]:
+    ids = _spotify_inputs() if ids is None else ids
+    for i in ids:
+        subprocess.run(["pactl", "set-sink-input-mute", i, "1" if mute else "0"], capture_output=True)
+    return ids
+
+
+def _position() -> float:
+    out = subprocess.run(["playerctl", "-p", "spotify", "position"], capture_output=True, text=True).stdout
+    try:
+        return float(out.strip())
+    except ValueError:
+        return 0.0
+
+
+def _settle_restart(muted: list[str]):
+    """La app de escritorio, tras OpenUri, arranca la cancion y ~1.5 s despues
+    le vuelve a dar play sola (probado 2026-10-02: la posicion salta de 1.5 s
+    a 0.3 s): se oia un corte al principio. Con el stream en silencio se espera
+    ese reinicio, se regresa al segundo 0 y se quita el silencio: suena limpia."""
+    try:
+        muted = muted or _mute_spotify(True)  # en frio el stream aparece al sonar
+        start = time.time()
+        last = _position()
+        while time.time() - start < 3.0:
+            time.sleep(0.1)
+            if not muted:
+                muted = _mute_spotify(True)
+            pos = _position()
+            if pos < last - 0.5:  # el reinicio de la app
+                time.sleep(0.2)
+                break
+            last = pos
+        subprocess.run(["playerctl", "-p", "spotify", "position", "0"], capture_output=True)
+        time.sleep(0.15)
+    finally:
+        _mute_spotify(False, muted or None)
+
+
 def _desktop_open_uri(uri: str, deadline: float) -> dict | None:
     """OpenUri en la app de escritorio y espera a que suene algo nuevo."""
     _, before, _ = _desktop_state()
+    muted = _mute_spotify(True)  # ver _settle_restart
     call = subprocess.run(
         ["busctl", "--user", "call", DESKTOP_MPRIS, "/org/mpris/MediaPlayer2",
          "org.mpris.MediaPlayer2.Player", "OpenUri", "s", uri],
         capture_output=True,
     )
     if call.returncode != 0:
+        _mute_spotify(False, muted)
         return None
     end = min(time.time() + 6.0, deadline)
     while time.time() < end:
@@ -440,7 +494,9 @@ def _desktop_open_uri(uri: str, deadline: float) -> dict | None:
         status, trackid, track = _desktop_state()
         changed = trackid != before or uri.endswith(trackid.rsplit("/", 1)[-1])
         if status == "Playing" and changed and track["title"]:
+            _settle_restart(muted)
             return track
+    _mute_spotify(False, muted)
     # la app abrio la pagina (artista/lista) pero no arranco: play la arranca
     subprocess.run(["playerctl", "-p", "spotify", "play"], capture_output=True)
     time.sleep(1.5)

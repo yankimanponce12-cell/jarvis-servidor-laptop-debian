@@ -38,7 +38,7 @@ CANCIONES = [  # de Iron Man y del mismo estilo
     "Hells Bells AC/DC",
     "Iron Man Black Sabbath",
 ]
-VOLUMEN_TELE = 40
+VOLUMEN_TELE = 20
 ESPERA_S = 8  # tiempo para aplaudir despues de "ya llegue"
 ANTES_S = 4  # aplausos de hasta tanto antes de que llegara la orden (Whisper tarda ~2 s)
 MUSICA_ANTES_S = 5  # como en la alarma: primero suena la musica, luego habla Jarvis
