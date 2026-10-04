@@ -23,7 +23,19 @@ BATERIA_CADA_S = 120
 
 def avisar(texto: str, foto: bytes | None = None) -> bool:
     log.info(f"Aviso: {texto}")
+    _al_reloj(texto)
     return telegram.enviar_foto(foto, texto) if foto else telegram.enviar(texto)
+
+
+def _al_reloj(texto: str):
+    """El mismo aviso en el reloj (watch.py), con icono según de qué se trata."""
+    try:
+        from . import watch
+        t = texto.lstrip()
+        icono = ("recordatorio" if t[:1] in ("📝", "⏰", "⏱") else "alerta" if t[:1] in ("⚠", "🔋", "🪫") else "info")
+        watch.aviso(t.lstrip("📝⏰⏱⚠🔋🪫📷 ").strip(), "Recordatorio" if icono == "recordatorio" else "Jarvis", icono)
+    except Exception:
+        log.exception("No pude mandar el aviso al reloj")
 
 
 # ------------------------------------------------------------- aparatos --

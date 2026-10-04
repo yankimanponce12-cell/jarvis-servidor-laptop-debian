@@ -111,16 +111,35 @@ def saludo(ahora: datetime.datetime | None = None) -> str:
 
 def handle(n: str, respond, hud=None) -> bool:
     """n: minusculas sin tildes. hud=None (Telegram, servidor) no aplica."""
-    global _ultima
     if hud is None or not es_pedido(n):
         return False
+    _marcar_llegada()
+    oidos = _esperar_aplausos(hud)
+    logger.info("Entrada: " + ("dos aplausos" if oidos else f"sin aplausos en {ESPERA_S} s, entro igual"))
+    hud.log("👏👏 ¡Aplausos!" if oidos else "Sin aplausos: entrada de todos modos")
+    _recibir(respond)
+    return True
+
+
+def desde_el_reloj(respond, hud=None):
+    """El botón YA LLEGUE del reloj (reloj.py): la misma entrada, sin aplausos."""
+    _marcar_llegada()
+    logger.info("Entrada: desde el reloj")
+    if hud is not None:
+        hud.log("⌚ Entrada desde el reloj")
+    _recibir(respond)
+
+
+def _marcar_llegada():
+    global _ultima
     _ultima = time.time()
     from . import saludos
     saludos.visto()  # ya lo recibió: la cámara no vuelve a saludar
     saludos.marcar_buenos_dias()
-    oidos = _esperar_aplausos(hud)
-    logger.info("Entrada: " + ("dos aplausos" if oidos else f"sin aplausos en {ESPERA_S} s, entro igual"))
-    hud.log("👏👏 ¡Aplausos!" if oidos else "Sin aplausos: entrada de todos modos")
+
+
+def _recibir(respond):
+    global _ultima
     musica = threading.Thread(target=_musica_en_la_tele, daemon=True)
     musica.start()
     respond(random.choice(["Bienvenido a casa, señor.", "Bienvenido de vuelta, señor.", "Bienvenido a casa, señor. Preparando todo."]))
@@ -130,4 +149,3 @@ def handle(n: str, respond, hud=None) -> bool:
         respond(saludo())
         vigilancia.desactivar(respond, "(entrada: ya llegó)")
     _ultima = time.time()
-    return True

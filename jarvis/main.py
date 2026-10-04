@@ -19,7 +19,7 @@ from jarvis import server as jarvis_server
 from jarvis.commands import _is_affirmative, handle_command
 from jarvis.hud import Hud
 from jarvis.proactive import ProactiveSpeaker, greeting_for_time
-from jarvis import alarma, avisos, entrada, personalidad, recordatorios, saludos, telegram, vigilancia
+from jarvis import alarma, avisos, entrada, personalidad, recordatorios, reloj, saludos, telegram, vigilancia
 
 _log = logging.getLogger("jarvis.alarma")  # mismo jarvis.log (ver alarma.py): pausas, gestos e interrupciones
 from jarvis.tui import JarvisApp
@@ -301,6 +301,8 @@ class Session:
         self.telegram = telegram.Bot(self._remoto, self._remoto_especial, transcribir=self._transcribir_audio,
                                      sintetizar=voice_output.synthesize_wav_bytes, hud=hud)
         self.telegram.start()
+        # el reloj ESP32: control remoto, avisos, batería y pasos (reloj.py)
+        reloj.Enlace(self.respond, self._remoto, hud=hud).start()
         if not telegram.configurado():
             hud.log("Telegram sin configurar: venv/bin/python -m jarvis.telegram configurar <TOKEN>", "dim")
         hud.set_state("inactivo")

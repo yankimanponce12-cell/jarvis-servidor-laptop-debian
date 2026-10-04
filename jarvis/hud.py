@@ -44,6 +44,7 @@ class Hud:
         self._ui("ui_heard", text, final)
         if final and text:
             self._ui("ui_log", f"tú › {text}")
+            self._oido = text  # al reloj nunca va lo que dijo el usuario (ver _al_reloj)
 
     def flash(self, kind: str):
         """Destello breve del reactor: 'interrumpido' (se callo a Jarvis) o 'pausa'."""
@@ -52,13 +53,28 @@ class Hud:
     def set_response(self, text: str):
         self._ui("ui_reply", text)
         self._ui("ui_log", f"Jarvis › {text}", "#22d3ee")
-        watch.send_response(text)
+        self._respuesta = ""  # respuesta nueva: al reloj va completa, frase por frase (ver _al_reloj)
+        self._al_reloj(text)
 
     def append_response(self, text: str):
         """Siguiente frase de una respuesta que se va generando (ver llm.chat_stream)."""
         self._ui("ui_reply_append", text)
         self._ui("ui_log", f"         {text}", "#22d3ee")
-        watch.send_response(text)
+        self._al_reloj(text)
+
+    def _al_reloj(self, text: str):
+        """El reloj solo muestra lo que dice Jarvis: si la frase es (casi) lo que
+        el usuario acaba de decir, no se manda (pedido del usuario, 2026-10-04)."""
+        import difflib
+        from jarvis import charla
+        oido = charla.norm(getattr(self, "_oido", "") or "")
+        dicho = charla.norm(text)
+        if oido and dicho and (dicho in oido or difflib.SequenceMatcher(None, dicho, oido).ratio() >= 0.75):
+            return
+        # la respuesta se arma frase por frase (append_response): al reloj va todo lo
+        # dicho hasta ahora, no solo la última frase
+        self._respuesta = f"{getattr(self, '_respuesta', '')} {text}".strip()
+        watch.send_response(self._respuesta)
 
     def set_weather(self, temp: int, desc: str, code=None, is_day: bool = True, rain_prob=None, city: str = ""):
         """Titulo y panel de clima. code (WMO), is_day, rain_prob (%) y city

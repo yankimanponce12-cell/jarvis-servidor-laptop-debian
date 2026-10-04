@@ -1,4 +1,6 @@
 import logging
+import queue
+import socket
 import threading
 from pathlib import Path
 
@@ -36,7 +38,7 @@ WATCH_PORT = 80
 WATCH_ROUTE = "/jarvis"
 WEATHER_ROUTE = "/weather"  # separado de /jarvis: el clima no toca el estado de la conversacion
 HTTP_TIMEOUT = 0.7       # sub-segundo: nunca debe sentirse lento si el reloj no responde
-MDNS_TIMEOUT_MS = 1500
+MDNS_TIMEOUT_MS = 3000  # con 1500 a veces no alcanzaba (2026-10-04)
 
 _zeroconf = None
 _zeroconf_lock = threading.Lock()
@@ -63,6 +65,13 @@ def _resolve_ip(force: bool = False):
     if _cached_ip and not force:
         return _cached_ip
 
+    try:  # rápido: el sistema resuelve jarvis-watch.local (avahi/nss-mdns)
+        ip = socket.gethostbyname("jarvis-watch.local")
+        with _cache_lock:
+            _cached_ip = ip
+        return ip
+    except OSError:
+        pass
     try:
         info = _get_zeroconf().get_service_info(SERVICE_TYPE, SERVICE_NAME, timeout=MDNS_TIMEOUT_MS)
         addresses = info.parsed_addresses() if info else []
@@ -105,8 +114,28 @@ def _post(payload: dict, route: str = WATCH_ROUTE):
         logger.error(f"No se pudo mandar el estado al reloj: {exc}")
 
 
+# Un solo hilo manda todo EN ORDEN: con un hilo por mensaje, un "pensando"
+# podía llegar después del texto nuevo y borrarlo, o un texto viejo después
+# del nuevo (el usuario veía asomarse el mensaje anterior, 2026-10-04).
+_cola: "queue.Queue[tuple[dict, str]]" = queue.Queue(maxsize=50)
+_worker: threading.Thread | None = None
+
+
+def _trabajar():
+    while True:
+        payload, route = _cola.get()
+        _post(payload, route)
+
+
 def _send_async(payload: dict, route: str = WATCH_ROUTE):
-    threading.Thread(target=_post, args=(payload, route), daemon=True).start()
+    global _worker
+    if _worker is None:
+        _worker = threading.Thread(target=_trabajar, daemon=True, name="reloj-envios")
+        _worker.start()
+    try:
+        _cola.put_nowait((payload, route))
+    except queue.Full:
+        pass  # el reloj no contesta y se juntaron: se pierde este, no se traba nada
 
 
 def send_state(state: str):
@@ -130,3 +159,40 @@ def send_weather(temp: int, precip: float, humidity: int, pressure: int, wind: i
         {"temp": temp, "precip": precip, "humidity": humidity, "pressure": pressure, "wind": wind},
         route=WEATHER_ROUTE,
     )
+
+
+# ---------------------------------------------------------------- enlace --
+# Rutas nuevas del firmware (jarvis_link.ino en ~/reloj_mazatlan). Las usa reloj.py.
+def get_eventos(timeout: float = 1.5) -> dict | None:
+    """GET /eventos: {"bateria", "pasos", "eventos": [...]} (los botones que se
+    apretaron en el reloj desde la última vez), o None si no contesta."""
+    ip = _resolve_ip()
+    if ip is None:
+        return None
+    try:
+        r = requests.get(f"http://{ip}:{WATCH_PORT}/eventos", timeout=timeout)
+        return r.json() if r.ok else None
+    except (requests.RequestException, ValueError):
+        global _cached_ip
+        with _cache_lock:
+            _cached_ip = None  # que la próxima vez lo vuelva a buscar por mDNS
+        return None
+
+
+def aviso(texto: str, titulo: str = "Jarvis", icono: str = "info", botones: list | None = None):
+    """Aviso a pantalla completa en el reloj. icono: novia/papa/recordatorio/
+    alerta/foto/info. botones: [["SI", "foto_si:123"], ["NO", "foto_no:123"]]
+    (lo segundo vuelve a Jarvis como evento al tocarlo)."""
+    _send_async({"icono": icono, "titulo": titulo, "texto": texto, "botones": botones or []}, route="/aviso")
+
+
+def alarma(activa: bool):
+    _send_async({"activa": activa}, route="/alarma")
+
+
+def musica(titulo: str, artista: str, sonando: bool):
+    _send_async({"titulo": titulo, "artista": artista, "sonando": sonando}, route="/musica")
+
+
+def casa(datos: dict):
+    _send_async(datos, route="/casa")

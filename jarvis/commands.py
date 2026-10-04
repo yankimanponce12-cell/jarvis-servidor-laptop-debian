@@ -192,6 +192,13 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
         respond(random.choice(["Como guste, señor.", "Entendido, señor.", "De acuerdo, señor. Aquí estaré."]))
         return True
 
+    # "¿cuántos pasos llevo?", "¿cuánta batería tiene el reloj?" (reloj.py)
+    from . import reloj
+    del_reloj = reloj.responder_pregunta(t)
+    if del_reloj:
+        respond(del_reloj)
+        return True
+
     # "dile a mi novia que ya voy": recado para un invitado de Telegram (invitados.py)
     from . import invitados
     recado = invitados.recado_del_dueno(text)

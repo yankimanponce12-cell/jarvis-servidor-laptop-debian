@@ -88,6 +88,7 @@ def detener(respond=None) -> bool:
     if _estado is None:
         return False
     _estado = None
+    _reloj(False)
     subprocess.run(["playerctl", "-p", music.player(), "pause"], capture_output=True)
     cam = _camara()
     if _cam_por_alarma and cam is not None:
@@ -98,6 +99,15 @@ def detener(respond=None) -> bool:
         respond(_sir(random.choice(["Alarma apagada. Que tenga un excelente día", "Listo. A empezar el día",
                                     "Alarma apagada. Buenos días otra vez"])))
     return True
+
+
+def _reloj(activa: bool):
+    """El reloj parpadea mientras suena (y tocarlo la apaga, ver reloj.py)."""
+    try:
+        from . import watch
+        watch.alarma(activa)
+    except Exception:
+        logger.exception("Alarma: no pude avisar al reloj")
 
 
 def _sir(msg: str) -> str:
@@ -329,6 +339,7 @@ def saludo(ahora: datetime.datetime | None = None) -> str:
 def _terminar_sin_pausar():
     global _estado, _cam_por_alarma
     _estado = None
+    _reloj(False)
     cam = _camara()
     if _cam_por_alarma and cam is not None:
         _cam_por_alarma = False
@@ -378,6 +389,7 @@ class Despertador:
         _sono_a = time.time()
         _estado = "saludando"
         logger.info("Sonando la alarma")
+        _reloj(True)
         cam = _camara()
         if cam is not None and not cam.activa:  # se prende ya: tarda unos segundos en cargar
             _cam_por_alarma = True

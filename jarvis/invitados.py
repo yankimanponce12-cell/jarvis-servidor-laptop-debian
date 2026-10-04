@@ -475,8 +475,40 @@ def _pedir_permiso(chat_id: int) -> str:
     _pedidos[chat_id] = ahora
     telegram.enviar(f"📷 Tu {nombre(chat_id)} quiere ver la cámara. ¿Le das permiso {PERMISO_MIN} minutos?",
                     botones=[[(f"✅ Sí, {PERMISO_MIN} min", f"foto:si:{chat_id}"), ("❌ No", f"foto:no:{chat_id}")]])
+    _al_reloj(chat_id, "Foto", f"Tu {nombre(chat_id)} quiere ver la cámara. ¿Le das permiso {PERMISO_MIN} minutos?",
+              [["SI", f"foto_si:{chat_id}"], ["NO", f"foto_no:{chat_id}"]])
     log.info(f"Invitados: {nombre(chat_id)} pidió ver la cámara")
     return _sir(f"Le pedí permiso a {_dueno()}. En cuanto lo autorice le mando la foto")
+
+
+# ------------------------------------------------------------------ reloj --
+def _boton(callback_id, texto: str):
+    if callback_id:  # None = la decisión llegó del reloj, no de un botón de Telegram
+        telegram.responder_boton(callback_id, texto)
+
+
+def _editar(mensaje, texto: str):
+    if mensaje:
+        telegram.editar(mensaje, texto)
+    else:
+        telegram.enviar(f"⌚ {texto}")  # decidido en el reloj: queda constancia en Telegram
+
+
+def _al_reloj(chat_id: int, titulo: str, texto: str, botones: list | None = None):
+    """Aviso en el reloj del dueño (watch.py). Nunca falla hacia el llamador."""
+    try:
+        from . import watch
+        watch.aviso(texto, titulo, "novia" if es_novia(chat_id) else "papa", botones)
+    except Exception:
+        log.exception("Invitados: no pude avisar al reloj")
+
+
+def decidir_foto(chat_id: int, si: bool):
+    """✅/❌ tocado en el reloj (reloj.py): lo mismo que los botones de Telegram."""
+    if es_novia(chat_id):
+        _callback_novia(chat_id, si, None, None)
+    else:
+        callback(f"foto:{'si' if si else 'no'}:{chat_id}", None, None)
 
 
 # ------------------------------------------------------------------ novia --
@@ -510,6 +542,8 @@ def _foto_novia(chat_id: int) -> str:
     telegram.enviar_foto(jpg, f"📷 Tu novia pidió una foto del cuarto ({datetime.datetime.now():%H:%M}). "
                               "Esta es la que le mandaría:")
     telegram.enviar("¿Se la mando?", botones=[[("✅ Sí, mándasela", f"fnov:si:{chat_id}"), ("❌ No", f"fnov:no:{chat_id}")]])
+    _al_reloj(chat_id, "Foto", "Tu novia pidió una foto del cuarto. ¿Se la mando? (la ves en Telegram)",
+              [["SI", f"foto_si:{chat_id}"], ["NO", f"foto_no:{chat_id}"]])
     log.info(f"Invitados: la novia pidió una foto; esperando al dueño")
     return _sir(f"Tomé la foto y se la pasé a {_dueno()} para que la apruebe. En cuanto diga que sí, se la mando")
 
@@ -517,17 +551,17 @@ def _foto_novia(chat_id: int) -> str:
 def _callback_novia(cid: int, si: bool, callback_id: str, mensaje: dict):
     jpg = _fotos_novia.pop(cid, None)
     if jpg is None or not es_invitado(cid):
-        telegram.responder_boton(callback_id, "Esa foto ya no está pendiente")
+        _boton(callback_id, "Esa foto ya no está pendiente")
         return
     if si:
-        telegram.responder_boton(callback_id, "Enviada")
-        telegram.editar(mensaje, "✅ Le mandé la foto a tu novia.")
+        _boton(callback_id, "Enviada")
+        _editar(mensaje, "✅ Le mandé la foto a tu novia.")
         telegram.enviar_foto(jpg, f"Aquí tiene, señorita: el cuarto a las {datetime.datetime.now():%H:%M}. "
                                   f"{_dueno()} la aprobó.", chat_id=cid)
     else:
         _negado[cid] = time.time()
-        telegram.responder_boton(callback_id, "No se la mando")
-        telegram.editar(mensaje, "❌ No le mandé la foto a tu novia.")
+        _boton(callback_id, "No se la mando")
+        _editar(mensaje, "❌ No le mandé la foto a tu novia.")
         telegram.enviar(f"{_dueno()} prefirió no mandar la foto esta vez, señorita.", chat_id=cid)
     log.info(f"Invitados: el dueño {'aprobó' if si else 'negó'} la foto de la novia")
 
@@ -579,6 +613,7 @@ def _recordatorio_novia(chat_id: int, texto: str, n: str) -> str | None:
     if para_dueno:
         rec._agregar("recordatorio", at, texto=que, de=nombre(chat_id))
         telegram.enviar(f"⏰ Tu {nombre(chat_id)} te dejó un recordatorio ({cuando}): «{que or 'avisarte'}».")
+        _al_reloj(chat_id, f"Recordatorio de tu {nombre(chat_id)}", f"{que or 'Avisarte'} ({cuando})")
         return _sir(f"Listo. Se lo recordaré a {_dueno()} {cuando}" + (f": {que}" if que else ""))
     rec._agregar("recordatorio", at, texto=que, para=chat_id)
     return _sir(f"Anotado: le recordaré {que} {cuando}" if que else f"Le aviso {cuando}")
@@ -597,20 +632,20 @@ def callback(data: str, callback_id: str, mensaje: dict) -> bool:
     _pedidos.pop(cid, None)
     quien = nombre(cid)
     if not es_invitado(cid):
-        telegram.responder_boton(callback_id, "Ese invitado ya no existe")
+        _boton(callback_id, "Ese invitado ya no existe")
         return True
     if si:
         _dar_permiso(cid, PERMISO_MIN)
         hasta = (datetime.datetime.now() + datetime.timedelta(minutes=PERMISO_MIN)).strftime("%H:%M")
-        telegram.responder_boton(callback_id, "Autorizado")
-        telegram.editar(mensaje, f"✅ Tu {quien} puede ver la cámara hasta las {hasta}. "
+        _boton(callback_id, "Autorizado")
+        _editar(mensaje, f"✅ Tu {quien} puede ver la cámara hasta las {hasta}. "
                                  f"Para quitarlo antes: «quítale el permiso a mi {quien}».")
         telegram.enviar(f"{_dueno()} lo autorizó, señor. Puede ver la cámara {PERMISO_MIN} minutos.", chat_id=cid)
         threading.Thread(target=_foto_para, args=(cid,), daemon=True).start()
     else:
         _negado[cid] = time.time()
-        telegram.responder_boton(callback_id, "Negado")
-        telegram.editar(mensaje, f"❌ No autorizaste que tu {quien} vea la cámara.")
+        _boton(callback_id, "Negado")
+        _editar(mensaje, f"❌ No autorizaste que tu {quien} vea la cámara.")
         telegram.enviar(f"{_dueno()} prefirió que no esta vez, señor.", chat_id=cid)
     log.info(f"Invitados: el dueño {'autorizó' if si else 'negó'} la cámara a {quien}")
     return True
@@ -713,6 +748,7 @@ def _atender(chat_id: int, texto: str) -> str | None:
             return _foto_novia(chat_id)
     if re.search(_RECADO, n):
         telegram.enviar(f"💬 Recado de tu {nombre(chat_id)}: «{texto.strip()}»")
+        _al_reloj(chat_id, f"Recado de tu {nombre(chat_id)}", texto.strip())
         log.info(f"Invitados: recado de {nombre(chat_id)} para el dueño")
         return _sir(f"Ya se lo mandé a {_dueno()}")
     if n in ("start", "ayuda", "help", "que puedes hacer", "que haces", "que sabes hacer", "para que sirves"):
