@@ -1,9 +1,12 @@
-"""Spotify por terminal (ncspot): abrirlo, reproducir por artista, cancion o
-genero, y cerrarlo. ncspot expone un socket Unix
-($XDG_RUNTIME_DIR/ncspot/ncspot.sock) donde acepta los mismos comandos que su
-linea de comandos (`search ...`, `play`, `next`, `shuffle on`, `quit`) y emite
-el estado en JSON cada vez que cambia. Pausa/siguiente/que suena van por MPRIS
+"""Spotify de escritorio (flatpak): abrirlo, reproducir por artista, cancion o
+genero, y cerrarlo. La busqueda va por la Web API de Spotify y la cancion se
+le pasa a la app por MPRIS (OpenUri). Pausa/siguiente/que suena van por MPRIS
 (playerctl, ver system.py).
+
+ncspot (Spotify por terminal) se DESCARTO el 2026-10-04 por pedido del
+usuario: todo va por la app de escritorio. Si esta cerrada se abre en la
+LAPTOP; a la tele solo va si se pide (pantalla_tele.py). Del login de ncspot
+queda el token de la Web API (TOKEN_PATH), que se sigue usando para buscar.
 
 handle() es el punto de entrada de commands.py: recibe el texto normalizado
 (minusculas, sin tildes) y devuelve True si era una peticion de Spotify."""
@@ -13,7 +16,6 @@ import random
 import os
 import re
 import shutil
-import socket
 import subprocess
 import time
 import unicodedata
@@ -23,24 +25,12 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SOCKET_PATH = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "ncspot" / "ncspot.sock"
-
-# Web API de Spotify con el mismo token que usa ncspot (el lo guarda en su cache
-# y lo renueva con este client id). Ver play_query() para el porque.
+# Web API de Spotify con el token del login de ncspot (quedo en su cache y se
+# renueva con este client id; ver spotify_login.py).
 API_URL = "https://api.spotify.com/v1"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 NCSPOT_CLIENT_ID = "d420a117a32841c2b3474932e49fb54b"
 TOKEN_PATH = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "ncspot" / "rspotify_token.json"
-
-# terminal -> argv para ejecutar un comando en una ventana nueva (ncspot es
-# una TUI: sin terminal no tiene donde dibujarse)
-TERMINALS = [
-    ("alacritty", ["alacritty", "-e"]),
-    ("kitty", ["kitty"]),
-    ("foot", ["foot"]),
-    ("gnome-terminal", ["gnome-terminal", "--"]),
-    ("konsole", ["konsole", "-e"]),
-]
 
 # generos donde el filtro de Spotify (genre:"...") da mejores resultados que
 # la busqueda por texto (probado: "rock" a secas devuelve baladas pop-rock;
@@ -67,166 +57,9 @@ SONG_SHORTCUTS = [
 ]
 
 
-# ------------------------------------------------------------- conexion ---
-class _Conn:
-    """Conexion al socket de ncspot. Al conectar el servidor manda el estado
-    actual; despues cada cambio. Lo ultimo recibido queda en self.status."""
-
-    def __init__(self):
-        self.sock = None
-        self.status: dict | None = None
-        self.messages = 0  # mensajes de estado recibidos (para saber si un comando hizo algo)
-        self._buf = b""
-
-    def __enter__(self):
-        self.sock = socket.socket(socket.AF_UNIX)
-        self.sock.settimeout(0.3)
-        self.sock.connect(str(SOCKET_PATH))
-        self.poll(0.6)
-        return self
-
-    def __exit__(self, *exc):
-        try:
-            self.sock.close()
-        except OSError:
-            pass
-
-    def send(self, cmd: str):
-        self.sock.sendall((cmd + "\n").encode("utf-8"))
-
-    def poll(self, seconds: float):
-        """Lee lo que llegue durante `seconds` y actualiza self.status."""
-        end = time.time() + seconds
-        while time.time() < end:
-            try:
-                data = self.sock.recv(65536)
-            except socket.timeout:
-                continue
-            except OSError:
-                return
-            if not data:
-                return
-            self._buf += data
-            *lines, self._buf = self._buf.split(b"\n")
-            for line in lines:
-                try:
-                    self.status = json.loads(line.decode("utf-8", "replace"))
-                    self.messages += 1
-                except ValueError:
-                    pass
-
-
-def _mode(st: dict | None) -> str:
-    if not st:
-        return ""
-    mode = st.get("mode")
-    return next(iter(mode)) if isinstance(mode, dict) else str(mode or "")
-
-
-def _track(st: dict | None) -> dict:
-    return (st or {}).get("playable") or {}
-
-
-def is_running() -> bool:
-    try:
-        with _Conn():
-            return True
-    except OSError:
-        return False
-
-
-def available() -> bool:
-    return shutil.which("ncspot") is not None
-
-
-# ------------------------------------------------------------ acciones ----
-def open_spotify(timeout: float = 25.0) -> tuple[bool, str]:
-    """Abre ncspot en una ventana de terminal nueva y espera a que su socket
-    responda. (exito, motivo)"""
-    if is_running():
-        return True, "ya estaba abierto"
-    binary = shutil.which("ncspot")
-    if binary is None:
-        return False, "no tengo ncspot instalado"
-    term = next((argv for name, argv in TERMINALS if shutil.which(name)), None)
-    if term is None:
-        return False, "no encontré una terminal para abrirlo"
-    subprocess.Popen(
-        term + [binary],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,  # la ventana no muere con la terminal de Jarvis
-    )
-    end = time.time() + timeout
-    while time.time() < end:
-        time.sleep(0.5)
-        if is_running():
-            return True, "abierto"
-    return False, "se abrió la ventana pero ncspot no respondió (¿sesión iniciada?)"
-
-
-def close_spotify() -> bool:
-    """Cierra ncspot limpiamente (`quit` guarda su estado); si no responde, pkill."""
-    if not is_running():
-        return False
-    try:
-        with _Conn() as c:
-            c.send("quit")
-    except OSError:
-        pass
-    for _ in range(20):
-        time.sleep(0.25)
-        if not is_running():
-            return True
-    subprocess.run(["pkill", "-x", "ncspot"], capture_output=True)
-    return True
-
-
-def play_search(search: str, shuffle: bool = False, timeout: float = 40.0) -> dict | None:
-    """Busca y reproduce el primer resultado (el resto queda en la cola, asi
-    suenan varias canciones). Devuelve la pista que empezo a sonar, o None.
-
-    Como se comporta ncspot (medido con su log de depuracion):
-    - Con los resultados ya cargados, `play` produce UN mensaje de estado
-      ("Playing") a los 0.4-1.4 s. Sin resultados (Spotify limita las
-      busquedas con un 429 y ncspot espera y reintenta) no hace nada.
-    - A veces Spotify no entrega la clave de audio ("Audio key response
-      timeout"): la cancion no carga y ncspot queda detenido. Un `play` nuevo
-      reintenta la carga y suele funcionar.
-    - Reenviar `play` MIENTRAS una cancion carga la cancela (stop() y vuelve a
-      cargar), asi que no se reintenta antes de ~3.5 s.
-    Por eso: se manda `play`, se espera hasta 3.5 s a que suene (y siga
-    sonando 1.5 s mas) y si no, se reintenta."""
-    with _Conn() as c:
-        c.send("shuffle on" if shuffle else "shuffle off")
-        c.send(f"search {search}")
-        c.poll(1.5)  # los resultados suelen tardar ~1 s
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            seen = c.messages
-            c.send("play")
-            end = time.time() + 3.5
-            while time.time() < end:
-                c.poll(0.25)
-                if c.messages > seen and _mode(c.status) == "Playing":
-                    c.poll(1.5)  # que no se caiga enseguida (clave de audio)
-                    if _mode(c.status) == "Playing":
-                        return _track(c.status)
-                    break
-        return None
-
-
 # ------------------------------------------------- busqueda por Web API ----
-# Por que no basta con `search` + `play` de ncspot: cada `search` lanza 6
-# peticiones a la vez (canciones, albumes, artistas, listas, shows, episodios) y
-# Spotify (que comparte el limite entre todos los que usan el client id de
-# ncspot) responde 429 a la rafaga completa; ncspot espera el Retry-After y
-# vuelve a lanzar las 6 a la vez, asi que la lista de resultados nunca carga y
-# el `play` que llega con la lista vacia solo hace stop(). Una sola peticion
-# suelta si pasa (medido: 200 en 0.6 s contra 429 en las 6 en paralelo). Por eso
-# Jarvis pide UNA busqueda el mismo y le pasa a ncspot la URI por MPRIS
-# (OpenUri), que cuesta una peticion mas y carga cancion, artista o lista.
+# UNA sola busqueda por pedido (Spotify limita las rafagas con 429) y la URI
+# se le pasa a la app por MPRIS (OpenUri).
 def _load_token() -> dict | None:
     try:
         return json.loads(TOKEN_PATH.read_text())
@@ -358,60 +191,66 @@ def _candidates(query: str, is_genre: bool, genre_filter: str | None, deadline: 
         yield t["uri"]
 
 
-def _mpris_name() -> str | None:
-    """Nombre en el bus de sesion de ncspot ('org.mpris.MediaPlayer2.ncspot.instance123')."""
-    out = subprocess.run(["busctl", "--user", "list", "--no-legend"], capture_output=True, text=True).stdout
-    return next((line.split()[0] for line in out.splitlines() if line.startswith("org.mpris.MediaPlayer2.ncspot")), None)
-
-
-def _open_uri(c: _Conn, uri: str, deadline: float) -> dict | None:
-    """Le pide a ncspot (MPRIS OpenUri) reproducir la URI y espera a que suene.
-    (`playerctl open` no sirve: rechaza las URI spotify:, asi que va por busctl.)
-
-    ncspot pide la cancion/lista a Spotify una sola vez y, si le toca un 429 o
-    Spotify no da la clave de audio, no carga nada: se repite la orden (hasta 3
-    veces, dentro de `deadline`) con una pausa para que se enfrie el limite."""
-    name = _mpris_name()
-    if name is None:
-        return None
-    for attempt in range(3):
-        if attempt:
-            time.sleep(3)
-        if time.time() > deadline:
-            return None
-        seen = c.messages
-        call = subprocess.run(
-            ["busctl", "--user", "call", name, "/org/mpris/MediaPlayer2",
-             "org.mpris.MediaPlayer2.Player", "OpenUri", "s", uri],
-            capture_output=True,
-        )
-        if call.returncode != 0:
-            return None
-        end = min(time.time() + 15.0, deadline)
-        while time.time() < end:
-            c.poll(0.25)
-            if c.messages > seen and _mode(c.status) == "Playing":
-                c.poll(1.5)  # que no se caiga enseguida
-                if _mode(c.status) == "Playing":
-                    return _track(c.status)
-                break
-    return None
-
-
-# ------------------------------------------- Spotify de escritorio (tele) ----
-# Si la app de escritorio esta abierta (la de la tele, ver pantalla_tele.py),
-# las peticiones de musica suenan ahi: misma busqueda por Web API y la URI va
-# por MPRIS OpenUri. Se sabe que empezo a sonar cuando cambia la pista de MPRIS.
+# ------------------------------------------------- Spotify de escritorio ----
+# Misma busqueda por Web API y la URI va por MPRIS OpenUri. Se sabe que empezo a
+# sonar cuando cambia la pista de MPRIS.
 DESKTOP_MPRIS = "org.mpris.MediaPlayer2.spotify"
+_instalado: bool | None = None
 
 
 def desktop_running() -> bool:
-    return subprocess.run(["busctl", "--user", "status", DESKTOP_MPRIS], capture_output=True).returncode == 0
+    """La app contesta por MPRIS. (Solo con el nombre en el bus no basta: en el
+    flatpak lo publica xdg-dbus-proxy antes de que la app arranque de verdad.)"""
+    if subprocess.run(["busctl", "--user", "status", DESKTOP_MPRIS], capture_output=True).returncode != 0:
+        return False
+    try:  # mientras arranca, la pregunta se queda colgada sin respuesta
+        st = subprocess.run(["playerctl", "-p", "spotify", "status"], capture_output=True, text=True, timeout=2).stdout.strip()
+    except subprocess.TimeoutExpired:
+        return False
+    return st in ("Playing", "Paused", "Stopped")
+
+
+is_running = desktop_running
+
+
+def available() -> bool:
+    """La app de escritorio (flatpak com.spotify.Client) esta instalada."""
+    global _instalado
+    if _instalado is None:
+        _instalado = bool(shutil.which("flatpak")) and subprocess.run(
+            ["flatpak", "info", "com.spotify.Client"], capture_output=True).returncode == 0
+    return _instalado
 
 
 def player() -> str:
-    """Nombre para `playerctl -p`: la app de escritorio si esta abierta, si no ncspot."""
-    return "spotify" if desktop_running() else "ncspot"
+    """Nombre para `playerctl -p`."""
+    return "spotify"
+
+
+def open_spotify(timeout: float = 40.0) -> tuple[bool, str]:
+    """Abre Spotify de escritorio en la LAPTOP (no toca la tele) y espera a que
+    responda por MPRIS. (exito, motivo)"""
+    if desktop_running():
+        return True, "ya estaba abierto"
+    if not available():
+        return False, "no tengo Spotify instalado"
+    from .pantalla_tele import SPOTIFY_CMD_LAPTOP
+    subprocess.Popen(SPOTIFY_CMD_LAPTOP, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+    end = time.time() + timeout
+    while time.time() < end:
+        time.sleep(0.5)
+        if desktop_running():
+            time.sleep(3)  # recien abierto ignora el primer OpenUri si llega antes de cargar
+            return True, "abierto"
+    return False, "se abrió pero no respondió"
+
+
+def close_spotify() -> bool:
+    if not desktop_running() and subprocess.run(["pgrep", "-x", "spotify"], capture_output=True).returncode != 0:
+        return False
+    subprocess.run(["pkill", "-x", "spotify"], capture_output=True)
+    return True
 
 
 def _desktop_state() -> tuple[str, str, dict]:
@@ -532,26 +371,14 @@ def _desktop_play_query(query: str, is_genre: bool, genre_filter: str | None, ti
 
 
 def play_query(query: str, is_genre: bool = False, genre_filter: str | None = None, timeout: float = 60.0) -> dict | None:
-    """Busca `query` con una sola peticion a la Web API y reproduce el
-    resultado en ncspot (o en la app de escritorio si esta abierta). Devuelve la
-    pista que empezo a sonar, o None."""
-    if desktop_running():
-        if _access_token() is None:
-            return None
-        return _desktop_play_query(query, is_genre, genre_filter, timeout)
+    """Busca `query` con una sola peticion a la Web API y lo reproduce en Spotify
+    de escritorio (si esta cerrado lo abre en la laptop). Devuelve la pista que
+    empezo a sonar, o None."""
     if _access_token() is None:
-        # sin token de la Web API no hay otra: la busqueda de ncspot (fragil, ver arriba)
-        return play_search(genre_filter or query, shuffle=is_genre)
-    deadline = time.time() + timeout
-    with _Conn() as c:
-        c.send("shuffle on" if is_genre else "shuffle off")
-        for uri in _candidates(query, is_genre, genre_filter, deadline):
-            track = _open_uri(c, uri, deadline)
-            if track:
-                return track
-            if time.time() > deadline:
-                break
-    return None
+        return None
+    if not desktop_running() and not open_spotify()[0]:
+        return None
+    return _desktop_play_query(query, is_genre, genre_filter, timeout)
 
 
 # ---------------------------------------------------------- interpretacion --
@@ -644,9 +471,8 @@ def _play_another(respond) -> bool:
         return True
     respond(_sir(f"Pongo más de {artist}"))
     try:
-        # en ncspot, aleatorio entre sus canciones; la app de escritorio no arranca
-        # listas, asi que ahi se pone al artista (sus mas populares)
-        track = play_query(artist, is_genre=not desktop_running())
+        # la app de escritorio no arranca listas: se pone al artista (sus mas populares)
+        track = play_query(artist)
     except OSError:
         track = None
     if track and track.get("title") == before:
@@ -658,32 +484,14 @@ def _play_another(respond) -> bool:
 
 
 def _play_shortcut(uri: str, fallback: str, respond) -> bool:
-    if desktop_running():
-        track = _desktop_open_uri(uri, time.time() + 15) or play_query(fallback)
-        respond(_sir(f"Reproduciendo {_describe(track)}") if track else _sir("No pude reproducir la canción"))
-        return True
-    if not available():
-        respond(_sir("No tengo ncspot instalado para usar Spotify"))
-        return True
-    if not is_running():
+    if not desktop_running():
         respond(_sir("Abriendo Spotify"))
         ok, why = open_spotify()
         if not ok:
             respond(_sir(f"No pude abrir Spotify, {why}"))
             return True
-    try:
-        with _Conn() as c:
-            c.send("shuffle off")
-            track = _open_uri(c, uri, time.time() + 40)
-        if not track:
-            track = play_query(fallback)
-    except OSError as exc:
-        respond(_sir(f"Perdí la conexión con Spotify ({exc})"))
-        return True
-    if track:
-        respond(_sir(f"Reproduciendo {_describe(track)}"))
-    else:
-        respond(_sir("No pude reproducir la canción. Intente de nuevo en unos segundos"))
+    track = _desktop_open_uri(uri, time.time() + 15) or play_query(fallback)
+    respond(_sir(f"Reproduciendo {_describe(track)}") if track else _sir("No pude reproducir la canción"))
     return True
 
 
@@ -699,13 +507,7 @@ def handle(t: str, text: str, respond, escuchar=None) -> bool:
 
     # ---- cerrar
     if has_spotify and re.search(_CLOSE, n) and query is None:
-        if desktop_running():
-            subprocess.run(["pkill", "-x", "spotify"], capture_output=True)
-            respond(_sir("Spotify cerrado"))
-        elif close_spotify():
-            respond(_sir("Spotify cerrado"))
-        else:
-            respond(_sir("Spotify no estaba abierto"))
+        respond(_sir("Spotify cerrado") if close_spotify() else _sir("Spotify no estaba abierto"))
         return True
 
     # ---- ¿es una peticion de Spotify?
@@ -715,24 +517,20 @@ def handle(t: str, text: str, respond, escuchar=None) -> bool:
     if query is not None and not video:
         if has_spotify or re.search(_MUSIC_WORD, n):
             plays_music = True
-        elif query and (desk or available()) and (desk or is_running() or re.sub(r"\s+", " ", query) in GENRES):
+        elif query and (desk or re.sub(r"\s+", " ", query) in GENRES):
             plays_music = True  # "pon queen" con Spotify abierto, o "reproduce salsa"
-        elif not query and re.search(r"\b(?:otra|otro|diferente|siguiente)\b", n) and (desk or available() and is_running()):
+        elif not query and re.search(r"\b(?:otra|otro|diferente|siguiente)\b", n) and desk:
             plays_music = True  # "pon otra" con Spotify abierto: siguiente cancion
     if not wants_open and not plays_music:
         return False
     if not available() and not desk:
         if not has_spotify:
-            return False  # sin ncspot, "pon musica de X" cae a YouTube
-        respond(_sir("No tengo ncspot instalado para usar Spotify"))
+            return False  # sin Spotify, "pon musica de X" cae a YouTube
+        respond(_sir("No tengo Spotify instalado"))
         return True
 
-    # ---- abrir si hace falta (con la app de escritorio abierta se usa esa)
-    if desk:
-        if wants_open and not query:
-            respond(_sir("Spotify ya está abierto"))
-            return True
-    elif not is_running():
+    # ---- abrir si hace falta: en la LAPTOP (a la tele solo si se pide, tv.py)
+    if not desk:
         respond(_sir("Abriendo Spotify"))
         ok, why = open_spotify()
         if not ok:
@@ -746,7 +544,7 @@ def handle(t: str, text: str, respond, escuchar=None) -> bool:
         if plays_music and re.search(r"\b(?:otra|otro|diferente|nueva|siguiente)\b", n):
             return _play_another(respond)
         if plays_music or (wants_open and query is not None):
-            subprocess.run(["playerctl", "play"], capture_output=True)
+            subprocess.run(["playerctl", "-p", "spotify", "play"], capture_output=True)
             respond(_sir("Reanudando Spotify") if plays_music else _sir("Spotify abierto"))
         else:
             respond(_sir("Spotify abierto. Dígame qué quiere escuchar"))
@@ -771,6 +569,6 @@ def handle(t: str, text: str, respond, escuchar=None) -> bool:
     else:
         respond(_sir(f"Reproduciendo {_describe(track)}"))
     if rest:
-        # una sola fuente a la vez (mezclar en la cola de ncspot no es fiable)
+        # una sola cosa a la vez (la app no deja armar una cola mezclada por MPRIS)
         respond(_sir("Empecé con " + first + ". Cuando quiera " + " y ".join(rest) + ", pídamelo"))
     return True

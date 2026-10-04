@@ -20,7 +20,7 @@ APPS = {
     "navegador": (["brave-browser", "firefox", "chromium-browser", "google-chrome"], True),
     "brave": (["brave-browser"], True),
     "firefox": (["firefox"], True),
-    "spotify": (["spotify", "ncspot"], True),
+    "spotify": (["spotify"], True),  # la app de escritorio (flatpak): la abre music.open_spotify
     "cmd": (["ptyxis", "gnome-terminal", "konsole", "kitty", "alacritty", "foot", "xterm"], False),
     "consola": (["ptyxis", "gnome-terminal", "konsole", "kitty", "alacritty", "foot", "xterm"], False),
     "terminal": (["ptyxis", "gnome-terminal", "konsole", "kitty", "alacritty", "foot", "xterm"], False),
@@ -74,14 +74,14 @@ def play_youtube_video(video_id: str):
     webbrowser.open(f"https://www.youtube.com/watch?v={video_id}")
 
 
-def _ncspot_only(key: str) -> bool:
-    """'spotify' sin la app de escritorio: se usa ncspot, que es una TUI y
-    necesita abrirse en una ventana de terminal (ver music.py)."""
-    return key == "spotify" and shutil.which("spotify") is None and shutil.which("ncspot") is not None
+def _es_spotify(key: str) -> bool:
+    """Spotify de escritorio es un flatpak (no hay binario "spotify" en el PATH):
+    lo abre/cierra music.py, en la laptop (ncspot se descartó el 2026-10-04)."""
+    return key == "spotify"
 
 
 def open_app(app_name: str) -> bool:
-    if _ncspot_only(app_name.strip().lower()):
+    if _es_spotify(app_name.strip().lower()):
         from jarvis import music  # import tardio: music importa este modulo
 
         return music.open_spotify()[0]
@@ -104,7 +104,7 @@ def open_app(app_name: str) -> bool:
 
 
 def close_app(app_name: str) -> bool:
-    if _ncspot_only(app_name.strip().lower()):
+    if _es_spotify(app_name.strip().lower()):
         from jarvis import music
 
         return music.close_spotify()

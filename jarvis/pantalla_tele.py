@@ -25,6 +25,8 @@ from pathlib import Path
 TELE_JS = Path.home() / ".local" / "share" / "tele" / "tele.mjs"
 SPOTIFY_SCALE = "2"
 SPOTIFY_CMD = ["flatpak", "run", "--nosocket=wayland", "com.spotify.Client", f"--force-device-scale-factor={SPOTIFY_SCALE}"]
+# en la laptop, tamaño normal (también en XWayland: así después se puede pasar a la tele)
+SPOTIFY_CMD_LAPTOP = ["flatpak", "run", "--nosocket=wayland", "com.spotify.Client"]
 MPRIS_SPOTIFY = "org.mpris.MediaPlayer2.spotify"
 _BIN = Path.home() / ".local" / "bin"
 
@@ -177,8 +179,12 @@ def open_spotify_on_tv(timeout: float = 30) -> tuple[bool, str]:
     """Abre Spotify de escritorio (o reusa el abierto) en la tele a pantalla completa."""
     if not shutil.which("flatpak"):
         return False, "no tengo flatpak para abrir Spotify"
-    if spotify_running() and not x11_window_exists("spotify"):
-        # abierto en Wayland nativo (desde el menu): asi no se puede mover, se reabre
+    sonaba = False
+    if spotify_running() and (not x11_window_exists("spotify") or not _escala_de_tele()):
+        # abierto en Wayland nativo (desde el menu, no se puede mover) o con el tamaño de la
+        # laptop (en la tele 4K se ve diminuto y la escala solo se fija al abrir): se reabre
+        sonaba = subprocess.run(["playerctl", "-p", "spotify", "status"], capture_output=True,
+                                text=True).stdout.strip() == "Playing"
         subprocess.run(["pkill", "-x", "spotify"], capture_output=True)
         time.sleep(2)
     if not spotify_running():
@@ -190,7 +196,16 @@ def open_spotify_on_tv(timeout: float = 30) -> tuple[bool, str]:
         time.sleep(0.3)
     if not spotify_running():
         return False, "Spotify no respondió"
+    if sonaba:  # al reabrirlo para la tele, que siga la música (Spotify recuerda la canción)
+        time.sleep(3)
+        subprocess.run(["playerctl", "-p", "spotify", "play"], capture_output=True)
     return True, ""
+
+
+def _escala_de_tele() -> bool:
+    """Spotify se abrió con la escala de la tele (--force-device-scale-factor=2)."""
+    out = subprocess.run(["pgrep", "-a", "-x", "spotify"], capture_output=True, text=True).stdout
+    return f"--force-device-scale-factor={SPOTIFY_SCALE}" in out
 
 
 def spotify_on_tv() -> tuple[bool, str]:
