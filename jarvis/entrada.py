@@ -115,6 +115,9 @@ def handle(n: str, respond, hud=None) -> bool:
     if hud is None or not es_pedido(n):
         return False
     _ultima = time.time()
+    from . import saludos
+    saludos.visto()  # ya lo recibió: la cámara no vuelve a saludar
+    saludos.marcar_buenos_dias()
     oidos = _esperar_aplausos(hud)
     logger.info("Entrada: " + ("dos aplausos" if oidos else f"sin aplausos en {ESPERA_S} s, entro igual"))
     hud.log("👏👏 ¡Aplausos!" if oidos else "Sin aplausos: entrada de todos modos")

@@ -395,6 +395,8 @@ class Despertador:
         try:
             with audio_focus.sin_atenuar():  # la cancion sigue a todo volumen mientras habla
                 self._respond(saludo())
+                from . import saludos
+                saludos.marcar_buenos_dias()  # la cámara ya no repite los buenos días
         finally:
             if _estado == "saludando":
                 _estado = "esperando"  # ahora si: la palma apaga la alarma

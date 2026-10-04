@@ -1,3 +1,4 @@
+import datetime
 import os
 import re
 import signal
@@ -18,7 +19,7 @@ from jarvis import server as jarvis_server
 from jarvis.commands import _is_affirmative, handle_command
 from jarvis.hud import Hud
 from jarvis.proactive import ProactiveSpeaker, greeting_for_time
-from jarvis import alarma, avisos, entrada, personalidad, recordatorios, telegram, vigilancia
+from jarvis import alarma, avisos, entrada, personalidad, recordatorios, saludos, telegram, vigilancia
 
 _log = logging.getLogger("jarvis.alarma")  # mismo jarvis.log (ver alarma.py): pausas, gestos e interrupciones
 from jarvis.tui import JarvisApp
@@ -226,6 +227,7 @@ class Session:
                 _log.info(f"Cámara: {tipo} ignorada durante la alarma")  # no pausar ni saludar encima
                 return
             if tipo == "llegada" and entrada.reciente():
+                saludos.visto()
                 _log.info("Cámara: llegada durante la entrada de «ya llegué», sin otro saludo")
                 return
             if tipo == "llegada" and vigilancia.en_llegada(quien, self.respond):
@@ -238,15 +240,20 @@ class Session:
         if tipo == "salida":
             # la música sigue (el usuario no quiere que se pause al dejar de verlo, 2026-10-02)
             hud.log("🚶 No te veo desde hace 2 minutos")
+            saludos.visto(datetime.datetime.now() - datetime.timedelta(seconds=camara.AUSENTE_S))
         elif tipo == "llegada":
             if time.monotonic() - self._booted_at < 30:
                 return  # al arrancar ya saluda greeting_for_time()
-            nombre = memory.get_name() if dato else ""
             hud.log("🙂 Llegaste" + (" (te reconocí)" if dato else ""))
             if dato or not camara.instancia or not camara.instancia.tiene_caras:
-                # con caras aprendidas, a un desconocido no se le saluda
-                self.respond(f"Bienvenido de vuelta, {nombre or 'señor'}.")
-                self._flush()
+                # con caras aprendidas, a un desconocido no se le saluda. Y no a cada rato:
+                # buenos días una vez en la mañana, o tras horas sin verlo (saludos.py)
+                frase = saludos.al_llegar()
+                if frase:
+                    self.respond(frase)
+                    self._flush()
+                else:
+                    hud.log("   (sin saludo: lo vi hace poco)")
 
     # ---- arranque --------------------------------------------------------
     def on_ready(self):
@@ -298,6 +305,7 @@ class Session:
             hud.log("Telegram sin configurar: venv/bin/python -m jarvis.telegram configurar <TOKEN>", "dim")
         hud.set_state("inactivo")
         threading.Thread(target=self.respond, args=(greeting_for_time(),), daemon=True).start()
+        saludos.marcar_buenos_dias()  # en la mañana, el saludo al arrancar ya cuenta como "buenos días"
         self._flush()
 
         if self.listener is None:
