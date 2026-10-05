@@ -388,6 +388,9 @@ SAVE_AUDIO = os.environ.get("JARVIS_GUARDAR_AUDIO") == "1"
 SAVE_AUDIO_KEEP = 30
 
 
+_perdidas = [0, 0]  # [tramas perdidas por el micro (overflow) en total, las ya anotadas en el log]
+
+
 def _log_utterance(audio: np.ndarray, vosk: bool, whisper: str, final: str, note: str = ""):
     """Una linea por frase en logs/escucha.log: duracion, nivel, si Vosk oyo
     "jarvis", que escribio Whisper y que se le paso a Jarvis."""
@@ -395,8 +398,10 @@ def _log_utterance(audio: np.ndarray, vosk: bool, whisper: str, final: str, note
         LOG_DIR.mkdir(exist_ok=True)
         now = datetime.datetime.now()
         db = mic_config.rms_to_db(float(np.sqrt(np.mean(audio**2)))) if audio.size else float("-inf")
+        perdidas, _perdidas[1] = _perdidas[0] - _perdidas[1], _perdidas[0]
         line = (f"{now:%Y-%m-%d %H:%M:%S} dur={audio.size / SAMPLE_RATE:4.1f}s nivel={db:5.1f}dB "
-                f"vosk={'SI' if vosk else 'no'} whisper={whisper!r} -> {final!r}{' ' + note if note else ''}\n")
+                f"vosk={'SI' if vosk else 'no'} whisper={whisper!r} -> {final!r}{' ' + note if note else ''}"
+                f"{f' [se perdieron {perdidas} tramas del micro]' if perdidas else ''}\n")
         with open(LOG_DIR / "escucha.log", "a", encoding="utf-8") as f:
             f.write(line)
         if SAVE_AUDIO and audio.size:
@@ -497,6 +502,8 @@ class VoiceListener:
         """Lee tramas de la cola hasta que el Endpointer cierra una frase."""
         while True:
             frame = q.get()
+            mic_config.report_level(float(np.sqrt(np.mean(frame**2))))  # medidor de la interfaz
+            aplausos.alimentar(frame)  # "ya llegue" + dos aplausos (entrada.py)
             if spot:
                 self._ring.append(frame)
                 words = self._spotter.feed(frame)
@@ -514,11 +521,16 @@ class VoiceListener:
                 return audio
 
     def _open_stream(self, q):
+        # El callback corre en el hilo de PortAudio y necesita el GIL: si tarda
+        # (o espera a que otro hilo suelte el GIL: cámara, IA, reloj), se pierden
+        # tramas y Whisper oye palabras mochas ("apáala a telé", 2026-10-05).
+        # Por eso aquí SOLO se copia y encola; el medidor y los aplausos van en
+        # el hilo que consume (_next_utterance). latency="high": PortAudio guarda
+        # más audio si el proceso se atrasa un momento, en vez de tirarlo.
         def callback(indata, frames, time_info, status):
-            frame = indata[:, 0].copy()
-            mic_config.report_level(float(np.sqrt(np.mean(frame**2))))  # medidor de la interfaz
-            aplausos.alimentar(frame)  # "ya llegue" + dos aplausos (entrada.py)
-            q.put(frame)
+            if status.input_overflow:
+                _perdidas[0] += 1
+            q.put(indata[:, 0].copy())
 
         return sd.InputStream(
             samplerate=SAMPLE_RATE,
@@ -527,6 +539,7 @@ class VoiceListener:
             blocksize=FRAME,
             device=self._device,
             callback=callback,
+            latency="high",
         )
 
     def _safe_transcribe(self, audio: np.ndarray, language: str) -> str:
