@@ -43,6 +43,7 @@ _estado = {"bateria": None, "pasos": None, "visto": 0.0}
 CATALOGO = [
     ("CASA", [("ESTADO", "estado"), ("FOTO", "foto"), ("VIGILAR", "activa la vigilancia"),
               ("NO VIGILAR", "desactiva la vigilancia"), ("QUIEN VINO", "quién vino mientras no estaba"),
+              ("FOTOS INTRUSO", "enséñame quién entró"),
               ("CAMARA ON", "prende la cámara"), ("CAMARA OFF", "apaga la cámara")]),
     ("TELE Y PS5", [("PRENDER TELE", "prende la tele"), ("APAGAR TELE", "apaga la tele"),
                     ("TELE?", "está prendida la tele"), ("MODO JUEGO", "modo juego"),
