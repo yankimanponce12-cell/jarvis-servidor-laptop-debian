@@ -29,7 +29,7 @@ CHISTES = [
     "¿Por qué el mar no se seca? Porque no tiene toalla, señor.",
     "¿Qué le dijo la luna al sol? Tan grande y no te dejan salir de noche, señor.",
     "¿Cómo se llama el campeón de buceo japonés? Tokofondo. ¿Y el subcampeón? Kasitoko, señor.",
-    "El señor Stark me pidió una vez que le contara un chiste de construcción. Todavía estoy trabajando en él, señor.",
+    "Tony Stark me pidió una vez que le contara un chiste de construcción. Todavía estoy trabajando en él, señor.",
     "¿Qué le dice un gusano a otro gusano? Voy a dar una vuelta a la manzana, señor.",
     "¿Por qué el esqueleto no fue a la fiesta? Porque no tenía cuerpo para ir, señor.",
     "¿Cuál es el animal más antiguo? La cebra, señor, porque está en blanco y negro.",
@@ -49,6 +49,20 @@ _pendientes: list[str] = []
 def es_pedido(t: str) -> bool:
     """t: texto normalizado (minusculas, sin tildes)."""
     return bool(CHISTE_RE.search(t))
+
+
+def _clave(frase: str) -> str:
+    """El chiste sin el trato ni signos: el mismo para "señor" y "señorita" (invitados.adaptar)."""
+    t = frase.lower().translate(str.maketrans("áéíóúñü", "aeiounu"))
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", t)).strip()[:35]
+
+
+_CLAVES = {_clave(c) for c in CHISTES}
+
+
+def es_chiste(frase: str) -> bool:
+    """¿frase es uno de los chistes? (para entender "otro" o "jaja" justo después)."""
+    return bool(frase) and _clave(frase) in _CLAVES
 
 
 def uno() -> str:

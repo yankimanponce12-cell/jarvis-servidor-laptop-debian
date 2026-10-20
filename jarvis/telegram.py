@@ -47,66 +47,127 @@ MAX_TEXTO = 4000  # Telegram corta en 4096
 
 # "ayuda" del dueño: TODOS los comandos (se manda en varios mensajes: Telegram corta en 4096)
 AYUDA = [
-    "🤖 COMANDOS DE JARVIS\n"
-    "Escríbeme o mándame un audio igual que me hablas en casa. Texto → te contesto con texto; audio → con voz.\n\n"
-    "🏠 CASA Y CÁMARA\n"
-    "• estado / estatus / ¿está todo bien en casa? — resumen de todo\n"
-    "• foto / foto del cuarto — lo que ve la cámara\n"
-    "• activa la vigilancia / desactiva la vigilancia — foto al celular si entra alguien que no eres tú\n"
-    "• ¿quién vino mientras no estaba? / ¿alguien entró hoy?\n"
-    "• prende la cámara / apaga la cámara / cómo está la cámara\n"
-    "• muestra la cámara / oculta la cámara — el panel en la pantalla de Jarvis\n"
-    "• aprende mi cara / olvida mi cara\n\n"
-    "⏰ ALARMA, RECORDATORIOS Y TEMPORIZADORES\n"
-    "• alarma a las 6 de la mañana / despiértame en 20 minutos\n"
-    "• ¿a qué hora está la alarma? / cancela la alarma\n"
-    "• al sonar se apaga con: ✋ palma, «ya me desperté», «apágala» o «pausa»\n"
-    "• recuérdame sacar la ropa en 40 minutos / recuérdame a las 5 llamar a mi mamá\n"
-    "• pon un temporizador de 10 minutos / ¿cuánto le falta al temporizador?\n"
-    "• ¿qué recordatorios tengo? / cancela el temporizador / cancela el recordatorio de la ropa",
+    "COMANDOS DE JARVIS\n"
+    "Escribe o manda audio. Texto se contesta con texto, audio con voz.\n\n"
+    "CASA\n"
+    "estado\n"
+    "foto\n"
+    "activa la vigilancia\n"
+    "desactiva la vigilancia\n"
+    "quién vino mientras no estaba\n"
+    "prende la cámara\n"
+    "apaga la cámara\n"
+    "muestra la cámara\n"
+    "oculta la cámara\n"
+    "aprende mi cara\n"
+    "olvida mi cara\n\n"
+    "ALARMA\n"
+    "alarma a las 7\n"
+    "despiértame en 20 minutos\n"
+    "a qué hora está la alarma\n"
+    "cancela la alarma\n"
+    "apaga la alarma\n\n"
+    "RECORDATORIOS\n"
+    "recuérdame sacar la ropa en 40 minutos\n"
+    "recuérdame a las 5 llamar a mi mamá\n"
+    "temporizador de 10 minutos\n"
+    "cuánto le falta al temporizador\n"
+    "qué recordatorios tengo\n"
+    "cancela el temporizador\n"
+    "cancela el recordatorio de la ropa\n\n"
+    "TELE Y PS5\n"
+    "prende la tele\n"
+    "apaga la tele\n"
+    "está prendida la tele\n"
+    "modo juego\n"
+    "quita el modo juego\n"
+    "pon la play\n"
+    "pon la laptop\n"
+    "pon netflix en la tele\n"
+    "sube el volumen de la tele 5\n"
+    "baja el volumen de la tele\n"
+    "silencia la tele\n"
+    "pausa la tele\n"
+    "dale play a la tele\n"
+    "pon spotify en la tele y reproduce acdc\n"
+    "quita el modo música\n"
+    "cuánto llevo jugando",
 
-    "📺 TELE Y PS5\n"
-    "• prende la tele / apaga la tele / ¿está prendida la tele?\n"
-    "• modo juego / quita el modo juego — tele + PS5\n"
-    "• pon la play / pon la laptop / pon el hdmi — cambia la entrada\n"
-    "• pon Netflix en la tele (YouTube, Prime, Disney, Max, Twitch, Plex, Spotify)\n"
-    "• sube el volumen de la tele 5 / baja el volumen de la tele / silencia la tele\n"
-    "• pausa la tele / dale play a la tele\n"
-    "• pon spotify en la tele y reproduce acdc / modo música / quita el modo música\n"
-    "• ¿cuánto llevo jugando?\n\n"
-    "🎵 MÚSICA\n"
-    "• abre spotify y pon canciones de rock / pon canciones de acdc / pon salsa / pon thunderstruck\n"
-    "• pausa / silencio / para la música — continúa / dale play\n"
-    "• siguiente canción / pon otra / ¿qué está sonando?\n"
-    "• cierra spotify / menea tu chapa\n"
-    "• pon música de X en YouTube / busca X en Google\n\n"
-    "💻 LAPTOP\n"
-    "• sube el volumen / pon el volumen al 50 / ¿qué volumen tengo? / silencia\n"
-    "• sube el brillo / pon el brillo al 50\n"
-    "• prende/apaga el wifi / ¿cómo está el wifi? / ¿qué redes wifi hay?\n"
-    "• prende/apaga el bluetooth / escanea dispositivos bluetooth / conecta con JBL / desconecta los audífonos\n"
-    "• ¿cuánta batería tengo? / ¿cómo está el sistema? / temperatura del procesador\n"
-    "• abre firefox / cierra la calculadora",
+    "MÚSICA\n"
+    "pon canciones de acdc\n"
+    "pon salsa\n"
+    "pausa\n"
+    "continúa\n"
+    "siguiente canción\n"
+    "qué está sonando\n"
+    "cierra spotify\n"
+    "pon música de queen en youtube\n"
+    "busca recetas en google\n\n"
+    "LAPTOP\n"
+    "sube el volumen\n"
+    "pon el volumen al 50\n"
+    "silencia\n"
+    "pon el brillo al 50\n"
+    "prende el wifi\n"
+    "apaga el wifi\n"
+    "redes wifi\n"
+    "prende el bluetooth\n"
+    "conecta con JBL\n"
+    "desconecta los audífonos\n"
+    "batería\n"
+    "cómo está el sistema\n"
+    "temperatura del procesador\n"
+    "abre firefox\n"
+    "cierra la calculadora\n\n"
+    "RELOJ\n"
+    "cuántos pasos llevo\n"
+    "batería del reloj\n\n"
+    "OTROS\n"
+    "qué hora es\n"
+    "clima\n"
+    "clima de mañana\n"
+    "va a llover\n"
+    "acuérdate que...\n"
+    "qué recuerdas de mí\n"
+    "cuéntame un chiste\n"
+    "cuéntame algo curioso\n"
+    "cuánto falta para mi cumpleaños\n"
+    "cuánto falta para mi aniversario",
 
-    "💬 OTROS\n"
-    "• ¿qué hora es? / ¿qué día es?\n"
-    "• ¿qué clima hace? / clima de Mazatlán / ¿va a llover? / probabilidad de lluvia\n"
-    "• mándale un whatsapp a mamá que ya voy (el mensaje en la misma frase)\n"
-    "• me llamo X / acuérdate que… / ¿qué recuerdas de mí?\n"
-    "• cuéntame un chiste\n"
-    "• sin comentarios / vuelve a comentar — mis comentarios de desvelo y PS5\n"
-    "• cualquier otra cosa: platicamos\n\n"
-    "👨 INVITADOS (tu papá)\n"
-    "• invitados — quién tiene acceso\n"
-    "• conversación de mi papá — lo último que ha hablado con Jarvis\n"
-    "• dale permiso a mi papá 30 minutos / quítale el permiso a mi papá — la cámara\n"
-    "• quita a mi papá — le cierra el acceso\n"
-    "• cuál es el código / cambia el código a 123456 / desactiva el código / desbloquea\n"
-    "• invita a mi mamá — código de un solo uso para alguien más\n"
-    "• sus recados («dile a Yair que…») te llegan solos, igual que la copia de cada foto que vea\n\n"
-    "🔔 TE AVISO SOLO\n"
-    "• alguien entró (con vigilancia), la alarma no se apagó, batería baja, tus recordatorios\n"
-    "• tu papá pidió la cámara (con botones ✅/❌), entró alguien con el código, intentos fallidos",
+    "WHATSAPP\n"
+    "Lo que te llegue a WhatsApp te lo paso aquí. Para contestar, desliza el mensaje y responde (texto, audio, foto, video o archivo).\n"
+    "wa mamá: ya voy\n"
+    "mándale un whatsapp a mamá que ya voy\n"
+    "foto o archivo con pie: wa mamá\n"
+    "chats de whatsapp\n"
+    "contactos de whatsapp juan\n"
+    "estado de whatsapp\n"
+    "pausa whatsapp\n"
+    "activa whatsapp\n"
+    "grupos de whatsapp sí / no\n"
+    "silencia a juan en whatsapp\n"
+    "quítale el silencio a juan en whatsapp\n"
+    "vincula whatsapp 6691234567\n"
+    "desvincula whatsapp\n"
+    "Llamadas: te aviso y puedes colgar; contestarlas o hacerlas no se puede.\n\n"
+    "MENSAJES QUE TE MANDO\n"
+    "resumen del día\n"
+    "resumen de la mañana\n"
+    "no me mandes mensajes\n"
+    "vuelve a mandarme mensajes\n"
+    "sin comentarios\n"
+    "vuelve a comentar\n\n"
+    "INVITADOS\n"
+    "invitados\n"
+    "conversación de mi papá\n"
+    "dale permiso a mi papá 30 minutos\n"
+    "quítale el permiso a mi papá\n"
+    "quita a mi papá\n"
+    "invita a mi mamá\n"
+    "cuál es el código\n"
+    "cambia el código a 123456\n"
+    "desactiva el código\n"
+    "desbloquea",
 ]
 
 
@@ -335,6 +396,7 @@ class Bot:
         offset = None
         dueno = _config()["chat_id"]
         espera = 2  # reintento tras un error: 2, 4, 8... hasta 30 s (antes 15 s fijos)
+        sin_red_desde = None  # para avisar cuánto duró la caída (mensajes.py)
         while not self._stop.is_set():
             try:
                 params = {"timeout": POLL_S, "allowed_updates": json.dumps(["message", "callback_query"])}
@@ -342,18 +404,34 @@ class Bot:
                     params["offset"] = offset
                 updates = _api("getUpdates", timeout=POLL_S + 15, data=params)
                 espera = 2
+                if sin_red_desde is not None:
+                    caida, sin_red_desde = time.time() - sin_red_desde, None
+                    from . import mensajes
+                    threading.Thread(target=mensajes.internet_volvio, args=(caida,), daemon=True).start()
             except Exception as exc:
-                log.warning(f"Telegram: sin conexión ({exc}); reintento en {espera} s")
+                sin_red_desde = sin_red_desde or time.time()
+                # el error trae la URL con el token del bot: que no quede en el log
+                error = re.sub(r"/bot[^/\s]+", "/bot<TOKEN>", str(exc))
+                log.warning(f"Telegram: sin conexión ({error}); reintento en {espera} s")
                 self._stop.wait(espera)
                 espera = min(espera * 2, 30)
                 continue
-            from . import invitados
+            from . import invitados, wa
             for u in updates:
                 offset = u["update_id"] + 1
                 boton = u.get("callback_query")
-                if boton:  # el dueño contestó "¿le das permiso?" (invitados.py)
-                    if (boton.get("from") or {}).get("id") == dueno:
-                        threading.Thread(target=invitados.callback, daemon=True,
+                if boton:  # el dueño contestó "¿le das permiso?" (invitados.py) o "¿apago la tele?" (mensajes.py)
+                    de = (boton.get("from") or {}).get("id")
+                    dato = boton.get("data") or ""
+                    if dato.startswith("nov:") and (de == dueno or invitados.es_novia(de)):  # trivia, dato... (novia.py)
+                        from . import novia
+                        threading.Thread(target=novia.callback, daemon=True,
+                                         args=(dato, boton["id"], boton.get("message") or {}, de)).start()
+                    elif de == dueno:
+                        from . import mensajes
+                        destino = (mensajes.callback if dato.startswith("msj:") else
+                                   wa.callback if dato.startswith("wa:") else invitados.callback)
+                        threading.Thread(target=destino, daemon=True,
                                          args=(boton.get("data"), boton["id"], boton.get("message") or {})).start()
                     continue
                 msg = u.get("message") or {}
@@ -377,8 +455,10 @@ class Bot:
                 retraso = time.time() - msg.get("date", time.time())
                 if retraso > 5:
                     log.warning(f"Telegram: el mensaje llegó con {retraso:.0f} s de retraso")
-                if texto:
-                    threading.Thread(target=self._atender, args=(texto,), daemon=True).start()
+                if wa.es_para_whatsapp(msg):  # respuesta a un mensaje de WhatsApp reenviado (wa.py)
+                    threading.Thread(target=wa.responder, args=(msg,), daemon=True).start()
+                elif texto:
+                    threading.Thread(target=self._atender, args=(texto, False, msg), daemon=True).start()
                 elif audio:
                     threading.Thread(target=self._atender_audio, args=(audio["file_id"],), daemon=True).start()
 
@@ -445,14 +525,14 @@ class Bot:
                 log.exception("Telegram: no pude armar la nota de voz")
         enviar((f"🎙 «{entendi}»\n" if entendi else "") + texto, chat_id=chat_id)  # sin voz: al menos el texto
 
-    def _atender(self, texto: str, por_voz: bool = False):
+    def _atender(self, texto: str, por_voz: bool = False, msg: dict | None = None):
         t0 = time.time()
         accion = _Accion("record_voice" if por_voz else "typing")
         with accion:
-            self._atender_(texto, por_voz, accion)
+            self._atender_(texto, por_voz, accion, msg)
         log.info(f"Telegram: contesté «{texto[:40]}» en {time.time() - t0:.1f} s")
 
-    def _atender_(self, texto: str, por_voz: bool, accion: _Accion):
+    def _atender_(self, texto: str, por_voz: bool, accion: _Accion, msg: dict | None = None):
         log.info(f"Telegram{' (audio)' if por_voz else ''}: {texto!r}")
         if self._hud:
             self._hud.log(f"📱 Telegram{' 🎙' if por_voz else ''}: {texto}")
@@ -468,6 +548,13 @@ class Bot:
             if admin:
                 enviar(admin)
                 return
+            if msg:  # WhatsApp escrito (wa.py): "wa mamá: ya voy", "chats de whatsapp"...
+                from . import wa
+                resp = wa.comando(texto, msg)
+                if resp is not None:
+                    if resp:
+                        enviar(resp)
+                    return
             if re.search(r"\b(?:foto|fotito|fotografia|fotografía|imagen|captura|cuarto)\b", texto.lower()):
                 accion.accion = "upload_photo"
             especial = self._especiales(texto)

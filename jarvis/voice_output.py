@@ -172,9 +172,20 @@ def is_echo(heard: str, started: float) -> bool:
     if _engine is not None and _engine.speaking_text:
         return True  # sigue hablando
     heard_n = _norm(heard)
-    for t0, t1, said in list(_said):
-        if now - t1 > ECHO_WINDOW_S:
-            continue
+    recientes = [(t0, t1, said) for t0, t1, said in list(_said) if now - t1 <= ECHO_WINDOW_S]
+    # una orden con "Jarvis" que Jarvis no acaba de decir es del usuario, aunque haya
+    # empezado justo al callarse o se le parezca: así se perdían "Jarvis, cierra Spotify"
+    # tras "Abriendo Spotify" y "Fina espacio. ¿Jarvis, dime el clima?" al final de un chiste
+    # (logs/escucha.log, 2026-10-07 a 09). Su propio "…Jarvis en línea" sí es eco: lo de
+    # después de "Jarvis" está en lo que dijo.
+    from . import wakeword
+    orden = wakeword.find_command(heard)
+    if orden is not None:
+        palabras = _norm(orden).split()
+        dichas = set(" ".join(_norm(s) for _, _, s in recientes).split())
+        if palabras and sum(p in dichas for p in palabras) / len(palabras) < 0.6:
+            return False
+    for t0, t1, said in recientes:
         if t0 - 0.5 <= started <= t1 + ECHO_TAIL_S:
             return True
         # por contenido solo con 3+ palabras: un "si" suelto (respuesta real a

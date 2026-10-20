@@ -46,6 +46,7 @@ MANO = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (5, 9), 
 AUSENTE_S = 120  # sin ver a nadie tanto tiempo = se fue
 LLEGADA_MIN_AUSENCIA_S = 0  # tras la "salida" (AUSENTE_S sin verlo), al volver a verlo siempre saluda
 PERSONA_CADA_S = 2.0  # EfficientDet: ~85 ms por pasada (medido 2026-10-02)
+FPS_VIVO = 15  # lectura mientras alguien mira en vivo (en_vivo.py); el analisis no sube
 FPS_REPOSO = 2  # sin movimiento un rato: menos cuadros (el calor frena a la IA en la grafica)
 REPOSO_TRAS_S = 10.0
 MOVIMIENTO_VENTANA_S = 3.0  # tras moverse algo, los gestos se siguen buscando este tiempo
@@ -134,6 +135,7 @@ class Camara:
         self.ventana = ventana_habilitada()  # mostrar la vista (se puede cambiar en caliente)
         self._cuadro = None  # el ultimo cuadro (720p) para foto(); solo en memoria
         self._cuadro_t = 0.0
+        self.espectadores = 0  # celulares viendo en vivo (en_vivo.py): se lee mas seguido
 
     # ---------------------------------------------------------- control --
     @property
@@ -280,6 +282,8 @@ class Camara:
         vista = {"mano": None, "mano_t": 0.0, "gesto": None, "score": 0.0, "disparo": None, "disparo_t": 0.0,
                  "persona": None, "nombre": None}
         abierta = False  # el panel de la terminal esta mostrando la camara
+        fps = FPS
+        ultimo_analisis = 0.0
         try:
             while not self._stop.is_set():
                 t0 = time.time()
@@ -288,6 +292,11 @@ class Camara:
                     time.sleep(0.5)
                     continue
                 self._cuadro, self._cuadro_t = frame, time.time()
+                # en vivo: el cuadro ya quedo para el celular; el analisis sigue a su ritmo
+                if self.espectadores and t0 - ultimo_analisis < 1 / fps:
+                    time.sleep(max(0.0, 1 / FPS_VIVO - (time.time() - t0)))
+                    continue
+                ultimo_analisis = t0
                 small = frame if frame.shape[1] == ANCHO else cv2.resize(frame, (ANCHO, ALTO), interpolation=cv2.INTER_AREA)
                 ahora = time.time()
 
@@ -385,7 +394,7 @@ class Camara:
                     abierta = False
 
                 fps = FPS if ahora - ultimo_mov < REPOSO_TRAS_S or self._aprendiendo is not None else FPS_REPOSO
-                time.sleep(max(0.0, 1 / fps - (time.time() - t0)))
+                time.sleep(max(0.0, 1 / (FPS_VIVO if self.espectadores else fps) - (time.time() - t0)))
         except Exception as exc:
             self._error = f"la cámara se detuvo ({exc})"
             log.exception("camara: hilo")

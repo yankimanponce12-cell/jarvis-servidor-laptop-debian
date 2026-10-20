@@ -76,7 +76,18 @@ _PADRE = (r"(?:(?:estuvo|esta|fue|es|era|estaba) (?:muy |bien |super |re )?(?:bu
           r"divertid[oa]|padrisim[oa]|lind[oa]|bien)|que (?:padre|chido|bonito|lindo|genial|bien|bueno|increible)|esta padre|"
           r"me (?:gusto|encanto) (?:mucho)?)(?: (?:la verdad|eh|jaja))?")
 _ACK = r"(?:ok|okey|okay|va|vale|sale|sip|si|ya|ah ok|ah okay|aja|entiendo|ya veo|perfecto|muy bien|que bien|ah muy bien|ok muy bien|ah ok muy bien|bueno|claro|de acuerdo|listo)"
-_RISA = r"(?:(?:ja|je|ji)+|(?:ja|je)+ (?:ja|je)+|lol|xd+|que risa|me da risa|jajaja \w+)"
+_RISA = (r"(?:(?:ay|ah|uy|no|jajaja|que) )?(?:(?:ja|je|ji|js|ka)+|(?:ja|je)+ (?:ja|je)+|lol|xd+|que risa|me da risa|"
+         r"me (?:hiciste|hizo|haces|hace) reir|(?:ja|je)+ (?:que )?(?:bueno|buena|malo|mala|chistoso|gracioso|tonto|feo))(?: \w+)?")
+_EMOJI_RISA = r"[😂🤣😆😹😅😁😄😃😸\s]+"
+# después de que Jarvis contó un chiste o un dato: "otro", "cuéntame otro", "uno más"...
+_OTRO = (r"(?:y |a ver |va |sale |ahora )?(?:(?:cuentame|cuenteme|dime|digame|echame|echate|platicame|cuenta|quiero|dame|deme|"
+         r"me cuentas|me dices|otro|otra)\s)?(?:otro|otra|uno mas|una mas|otro mas|otra mas|el siguiente|la siguiente|mas)"
+         r"(?: (?:chiste|dato|cosa|mas|por favor|porfa|porfis|plis|pls|pues|jarvis))*|otra vez|de nuevo|sigue|siguele")
+# "sí" a un "¿le cuento otro?"
+_ACEPTA = (r"(?:si|sii+|sip|simon|va|vale|sale|dale|claro|ok|okey|okay|bueno|andale|a ver|obvio|porfa|por favor|"
+           r"si por favor|si porfa|si porfis|claro que si|si claro|ya pues|venga|orale)(?: (?:jarvis|pues|gracias))?")
+_SIN_SUENO = r"(?:no (?:puedo|me puedo) dormir|no me da sueno|no tengo sueno|tengo insomnio|me desvele|ando desvelad[oa]|no me deja dormir \w+)"
+_FASTIDIO = r"(?:ash|ashh+|ush|agh|aj+|chale|uff+|pff+|meh|ay no|que aburrido|aburrido|no me gusto|que malo|malisimo|estuvo malo)"
 _GRACIAS = r"(?:(?:muchas |mil )?gracias(?: (?:por todo|jarvis|amigo))?|te lo agradezco|se lo agradezco)"
 _ADIOS = r"(?:adios|bye|hasta luego|nos vemos|hasta manana|me voy|ya me voy|cuidate|chao|chau|bai)"
 
@@ -126,6 +137,38 @@ def _gustos(t: str, trato: str, recientes: list[str]) -> str | None:
     return None
 
 
+def pide_otro(texto: str) -> bool:
+    """"otro", "cuéntame otro", "uno más", "otra vez"."""
+    return bool(re.fullmatch(_OTRO, _sin_jarvis(texto)))
+
+
+def acepta(texto: str) -> bool:
+    """"sí", "va", "dale", "sí, por favor"."""
+    return bool(re.fullmatch(_ACEPTA, _sin_jarvis(texto)))
+
+
+def _ofrecio_chiste(frase: str) -> bool:
+    return bool(re.search(r"\ble cuento (?:otro|un chiste)\b", norm(frase)))
+
+
+def sigue_chiste(texto: str, recientes: list[str]) -> bool:
+    """¿texto pide otro chiste? "otro" tras un chiste, o "sí" a "¿le cuento otro?"."""
+    from . import chistes
+    ultimo = recientes[-1] if recientes else ""
+    if not ultimo:
+        return False
+    if pide_otro(texto) and (chistes.es_chiste(ultimo) or _ofrecio_chiste(ultimo)):
+        return True
+    return acepta(texto) and _ofrecio_chiste(ultimo)
+
+
+def sigue_dato(texto: str, recientes: list[str]) -> bool:
+    """"otro" / "cuéntame más" justo después de un dato curioso."""
+    from . import curiosidades
+    ultimo = recientes[-1] if recientes else ""
+    return bool(ultimo) and ultimo in curiosidades.dichas and (pide_otro(texto) or pide_contar(texto))
+
+
 def rapida(texto: str, trato: str = "señor", recientes: list[str] | None = None, acks: bool = True) -> str | None:
     """Respuesta fija para la charla social, o None. recientes: lo último que
     dijo Jarvis (para no repetirse ni preguntar "¿y usted?" dos veces).
@@ -135,8 +178,23 @@ def rapida(texto: str, trato: str = "señor", recientes: list[str] | None = None
     if pregunta_su_vida(texto):
         return no_se_su_vida(trato, recientes)
     t = _sin_jarvis(texto)
+    if not t and re.search(r"\bjarvis\b", norm(texto)):  # solo "Jarvis": lo están llamando
+        return _elegir([f"¿Sí, {trato}? Dígame.", f"Aquí estoy, {trato}.", f"A sus órdenes, {trato}."], recientes)
+    if not t and texto.strip() and re.fullmatch(_EMOJI_RISA, texto.strip()):
+        t = "jaja"  # "😆😆😆"
     if not t or len(t.split()) > 9:
         return None
+    from . import chistes
+    tras_chiste = bool(recientes) and chistes.es_chiste(recientes[-1])
+    if re.fullmatch(_SIN_SUENO, t):
+        return _elegir([f"Uy, lo siento, {trato}. ¿Le cuento un chiste mientras le llega el sueño?",
+                        f"Qué mal, {trato}. Si quiere, le cuento un chiste para distraerse. ¿Le cuento uno?"], recientes)
+    if re.fullmatch(_FASTIDIO, t):
+        if tras_chiste:
+            return _elegir([f"Ese no fue de mis mejores, lo admito, {trato}. ¿Le cuento otro?",
+                            f"Tiene razón, {trato}, ese estuvo flojo. ¿Le cuento otro mejor?"], recientes)
+        return _elegir([f"Perdón, {trato}. ¿Le cuento un chiste para compensar?",
+                        f"Disculpe, {trato}. ¿En qué más le puedo ayudar?"], recientes)
     gusto = _gustos(t, trato, recientes)
     if gusto:
         return gusto
@@ -149,6 +207,12 @@ def rapida(texto: str, trato: str = "señor", recientes: list[str] | None = None
         return _elegir([f"Muy bien, gracias por preguntar, {trato}. ¿Y usted cómo está?",
                         f"De maravilla, {trato}; todos mis sistemas en orden. ¿Y usted qué tal?",
                         f"Muy bien, {trato}, gracias. ¿Cómo le va a usted?"], recientes)
+    h = datetime.datetime.now().hour
+    if re.fullmatch(r"(?:buenas noches|buena noche|hasta manana|descansa|me voy a dormir|ya me voy a dormir|a dormir)"
+                    r"(?: (?:amigo|que descanses|descansa))?", t) and (h >= 20 or h < 5):
+        # de noche es despedida, no saludo ("buenas noches" a las 3 am no es "qué gusto saludarle")
+        return _elegir([f"Buenas noches, {trato}. Que descanse.", f"Que duerma muy bien, {trato}.",
+                        f"Buenas noches, {trato}. Dulces sueños.", f"Descanse, {trato}. Aquí estaré mañana."], recientes)
     if re.fullmatch(rf"{_SALUDO}(?: (?:de nuevo|otra vez|amigo))?", t):
         return _elegir(_saludo_hora(trato) + [f"Hola, {trato}. Qué gusto saludarle.", f"Hola de nuevo, {trato}."], recientes)
     if re.fullmatch(_ESTOY_BIEN, t):
@@ -169,6 +233,10 @@ def rapida(texto: str, trato: str = "señor", recientes: list[str] | None = None
         return _elegir([f"Hasta luego, {trato}. Fue un gusto.", f"Que esté muy bien, {trato}.",
                         f"Cuídese mucho, {trato}."], recientes)
     if re.fullmatch(_RISA, t):
+        if tras_chiste:
+            return _elegir([f"Me alegra que le haya gustado, {trato}. ¿Le cuento otro?",
+                            f"Sabía que ese le iba a gustar, {trato}. ¿Le cuento otro?",
+                            f"Tengo más de donde salió ese, {trato}. ¿Le cuento otro?"], recientes)
         return _elegir([f"Me alegra sacarle una sonrisa, {trato}.", f"Mi humor es de fábrica, {trato}.",
                         "Hago lo que puedo con mis circuitos."], recientes)
     if re.fullmatch(_ACK, t):
@@ -231,7 +299,9 @@ def limpiar(frase: str, oyo: str, recientes: list[str], dueno: str = "", ya_preg
 
 def reaccion(texto: str, trato: str = "señor", recientes: list[str] | None = None) -> str:
     """Respuesta de emergencia cuando todo lo de la IA se filtró."""
-    if texto.strip().endswith("?"):
+    if texto.strip().endswith("?") or re.match(
+            r"(?:jarvis )?(?:que|cuanto|cuanta|cuantos|cuantas|donde|quien|quienes|cuando|como|cual|cuales|por que|porque|"
+            r"sabes|conoces|me puedes|puedes|hay)\b", norm(texto)):
         return _elegir([f"Buena pregunta, {trato}. Ahí sí no tengo una respuesta segura.",
                         f"Esa no me la sé, {trato}, y prefiero no inventarle."], recientes or [])
     return _elegir([f"Qué bien, {trato}. Me alegra que me lo cuente.", f"Me da gusto escucharlo, {trato}.",

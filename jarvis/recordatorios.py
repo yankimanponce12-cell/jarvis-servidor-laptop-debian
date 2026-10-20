@@ -42,6 +42,10 @@ _TRAMO = (r"(?:(?:" + _CANT + r")\s+" + _UNIDAD + r"|(?P<sola>hora|minuto))(?:\s
 _DURACION = re.compile(r"\b(?:" + _TRAMO + r")(?:\s+(?:y\s+)?(?:" + _TRAMO.replace("?P<", "?P<b_") + r"))?\b")
 
 _PIDE_REC = r"\b(?:recuerdame|recordarme|recuerdeme|me recuerdas|me recuerdes|avisame|aviseme|me avisas|me avises)\b"
+# "Recordatorio a las 1am usar viewbinding", "ponme un recordatorio en 20 minutos de..." (sin "recuérdame":
+# el 2026-10-05 eso se fue a la IA y el recordatorio nunca se creó)
+_NUEVO_REC = (r"^(?:jarvis )?(?:(?:pon|ponme|ponle|crea|creame|agrega|agregame|anota|anotame|haz|hazme|programa|programame|"
+              r"mete|guarda)\s+)?(?:un |nuevo |otro )?recordatorio\b")
 _TEMPO = r"\b(?:temporizador|temporizadores|timer|cronometro|cuenta regresiva)\b"
 _LISTA = r"\brecordatorios?\b"
 
@@ -169,18 +173,24 @@ def _texto_recordatorio(t: str, text: str, quitar: list[tuple[int, int]]) -> str
             chars[i] = " "
     s = re.sub(r"\s+", " ", "".join(chars)).strip(" ,.")
     s = re.sub(r"(?i)^(?:jarvis\W*)?(?:por favor\s+)?", "", s)
+    s = re.sub(r"(?i)^(?:(?:pon|ponme|ponle|crea|cr[eé]ame|agrega|agr[eé]game|anota|an[oó]tame|haz|hazme|programa|"
+               r"progr[aá]mame|mete|guarda)\s+)?(?:un |nuevo |otro )?recordatorio\b\s*(?:de |para |que )?", "", s.strip())
     s = re.sub(r"(?i)\b(?:recu[eé]rdame|recordarme|recu[eé]rdeme|me recuerdas|me recuerdes|av[ií]same|av[ií]seme|"
                r"me avisas|me avises|por favor|jarvis)\b", " ", s)
     s = re.sub(r"(?i)\b(?:en|dentro de|a las?|para las?|de aqu[ií] a)\s*$", "", s.strip())
     s = re.sub(r"(?i)^(?:en|dentro de|a las?|para las?)\s+", "", s.strip())
     # "que apague la estufa" se queda con el "que" ("le recuerdo que apague..."); "de/a/para" sueltos no
     s = re.sub(r"(?i)^(?:de|a|para)\s+", "", re.sub(r"\s+", " ", s).strip(" ,."))
-    return s.strip(" ,.")
+    s = s.strip(" ,.")
+    return s[0].lower() + s[1:] if len(s) > 1 and s[1].islower() else s  # "Le recordaré usar...", no "Usar"
 
 
 def handle(t: str, text: str, respond) -> bool:
     """t: minúsculas sin tildes; text: el original."""
     pide_rec = re.search(_PIDE_REC, t)
+    if not pide_rec and re.match(_NUEVO_REC, t):
+        from .alarma import parse_hora
+        pide_rec = bool(parse_duracion(t) or parse_hora(t))
     tempo = re.search(_TEMPO, t)
     lista = re.search(_LISTA, t)
     if not (pide_rec or tempo or lista):

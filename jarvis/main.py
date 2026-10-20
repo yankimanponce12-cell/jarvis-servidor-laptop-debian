@@ -19,7 +19,7 @@ from jarvis import server as jarvis_server
 from jarvis.commands import _is_affirmative, handle_command
 from jarvis.hud import Hud
 from jarvis.proactive import ProactiveSpeaker, greeting_for_time
-from jarvis import alarma, avisos, entrada, personalidad, recordatorios, reloj, saludos, telegram, vigilancia
+from jarvis import alarma, avisos, cochera, entrada, mensajes, personalidad, recordatorios, reloj, saludos, telegram, vigilancia
 
 _log = logging.getLogger("jarvis.alarma")  # mismo jarvis.log (ver alarma.py): pausas, gestos e interrupciones
 from jarvis.tui import JarvisApp
@@ -223,6 +223,7 @@ class Session:
             cam = camara.instancia
             quien = dato if dato else (None if cam and cam.tiene_caras else "")
             vigilancia.registrar(tipo, quien)  # "¿quien vino mientras no estaba?"
+            mensajes.camara(tipo, quien)  # "¿se te olvido apagar la tele?", "la casa esta callada"
             if alarma.sonando():
                 _log.info(f"Cámara: {tipo} ignorada durante la alarma")  # no pausar ni saludar encima
                 return
@@ -233,6 +234,8 @@ class Session:
             if tipo == "llegada" and vigilancia.en_llegada(quien, self.respond):
                 self._flush()
                 return
+            if tipo == "llegada" and quien is None:  # desconocido sin vigilancia: foto al Telegram
+                threading.Thread(target=mensajes.desconocido, daemon=True).start()
             self._camara_salida_llegada(tipo, dato)
 
     def _camara_salida_llegada(self, tipo: str, dato):
@@ -291,6 +294,7 @@ class Session:
         # se crea siempre para que "prende la camara" funcione sin reiniciar
         self.camara = camara.Camara(self._on_camara, on_vista=hud.camara_vista)
         camara.instancia = self.camara
+        cochera.iniciar()  # la cámara de la cochera (DroidCam): solo se conecta cuando hace falta
         if camara.habilitada() or vigilancia.activa():
             self.camara.start()
         recordatorios.Vigilante(self.respond, self._flush,
@@ -298,11 +302,14 @@ class Session:
         personalidad.Comentarista(self.respond, self._flush, lambda: self._ultima_actividad,
                                   ocupado=lambda: self._busy).start()
         avisos.MonitorBateria(self.respond).start()
+        mensajes.Mensajero(self._remoto).start()  # mensajes por iniciativa propia al Telegram del dueño
         self.telegram = telegram.Bot(self._remoto, self._remoto_especial, transcribir=self._transcribir_audio,
                                      sintetizar=voice_output.synthesize_wav_bytes, hud=hud)
         self.telegram.start()
+        # WhatsApp por Telegram (wa.py): puente de Baileys en Node, en su hilo (tarda ~1 s en arrancar)
+        threading.Thread(target=whatsapp.wa.iniciar, daemon=True).start()
         # el reloj ESP32: control remoto, avisos, batería y pasos (reloj.py)
-        reloj.Enlace(self.respond, self._remoto, hud=hud).start()
+        reloj.Enlace(self.respond, self._remoto, hud=hud, especiales=self._remoto_especial).start()
         if not telegram.configurado():
             hud.log("Telegram sin configurar: venv/bin/python -m jarvis.telegram configurar <TOKEN>", "dim")
         hud.set_state("inactivo")
@@ -438,6 +445,11 @@ class Session:
                      r"como va la casa|que hay de nuevo|como esta todo|como va todo|estado de la casa|reporte de la casa|"
                      r"estatus de la casa|novedades)\b", n):
             return {"texto": avisos.estado_casa()}
+        if cochera.pide_foto(n):  # antes que la del cuarto: "foto cochera"
+            jpg, error = cochera.foto()
+            if jpg:
+                return {"foto": jpg, "texto": f"La cochera a las {time.strftime('%H:%M')}, señor."}
+            return {"texto": f"No pude tomar la foto de la cochera, señor: {error}."}
         if vigilancia.pide_foto(n):
             jpg, error = vigilancia.foto_del_cuarto()
             if jpg:
@@ -613,6 +625,7 @@ class Session:
             if self._closed:
                 return
             self._closed = True
+        mensajes.apagado_limpio()  # al arrancar no dirá "me reinicié de golpe"
         # primero los servidores (lo mas pesado: si algo de abajo falla o tarda,
         # que no queden huerfanos ocupando la RAM y la grafica), y cada paso
         # por separado: una excepcion en uno no debe saltarse los demas

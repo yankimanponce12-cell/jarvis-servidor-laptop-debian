@@ -196,3 +196,8 @@ def musica(titulo: str, artista: str, sonando: bool):
 
 def casa(datos: dict):
     _send_async(datos, route="/casa")
+
+
+def comandos(cats: list):
+    """La lista de comandos del menú JARVIS del reloj: [{"n": "CASA", "c": [["ESTADO", "estado"], ...]}]."""
+    _send_async({"cats": cats}, route="/comandos")

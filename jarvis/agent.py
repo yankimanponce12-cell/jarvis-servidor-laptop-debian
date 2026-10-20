@@ -421,7 +421,7 @@ class Agent:
             if whatsapp.send_message(contacto, mensaje):
                 respond(_sir("Mensaje enviado"))
             else:
-                respond(_sir(f"No pude encontrar a {contacto} o enviar el mensaje en WhatsApp Web"))
+                respond(_sir(f"No pude encontrar a {contacto} en WhatsApp o mandarle el mensaje"))
             return ""
 
         if name == "reproducir_youtube":

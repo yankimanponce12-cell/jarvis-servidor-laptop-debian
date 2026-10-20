@@ -32,7 +32,7 @@ if not logger.handlers:  # al mismo jarvis.log que la voz (sin esto no quedaba r
 
 ARCHIVO = Path(__file__).resolve().parent.parent / "alarma.json"
 CANCION = "Back in Black AC/DC"  # la de Iron Man; despues sigue el autoplay
-VOLUMEN_TELE = 15  # PRUEBAS (2026-10-02): regresar a 50 cuando funcione
+VOLUMEN_TELE = 50  # el despertador Iron Man: AC/DC a 50 (estuvo en 15 para las pruebas del 2026-10-02)
 MAX_RETRASO = datetime.timedelta(minutes=30)
 SONANDO_POR = 30 * 60  # "apaga la alarma" en este rato pausa la musica en vez de cancelar
 
@@ -136,11 +136,14 @@ def parse_hora(n: str, ahora: datetime.datetime | None = None) -> datetime.datet
     "6:30", "seis y media", "7 menos cuarto", "a las 18"). Sin "de la manana/
     tarde" se toma la mas cercana (a las 11 pm "a las 6" son las 6 am)."""
     ahora = ahora or datetime.datetime.now()
+    n = re.sub(r"\b(\d{1,2}(?:[:.]\d{2})?)\s*([ap])\.?\s*m\b\.?", r"\1 \2m", n)  # "1am", "6p.m." -> "1 am"
     m = re.search(r"\b(?:a las?|para las?|las?)\s+" + _HORA + r"\b(?:\s*(?:[:.h]|y)\s*(\d{1,2}|" + _MIN_PALABRA + "|"
                   + "|".join(_MINUTOS) + r")\b|\s+(\d{2}|" + _MIN_PALABRA + r")\b"
                   r"|\s+menos\s+(\d{1,2}|cuarto|diez|cinco|veinte)\b)?", n)
     if not m:
         m = re.search(r"\b(\d{1,2})(?:[:.](\d{2}))\b()()", n)  # "alarma 6:30"
+    if not m:  # sin "a las": "alarma 6 de la mañana", "6 am", "siete y media pm"
+        m = re.search(r"\b" + _HORA + r"(?:\s*(?:[:.]|y)\s*(\d{2}|media|cuarto))?()()\s+(?=(?:am|pm|(?:de|en) la (?:manana|madrugada|tarde|noche))\b)", n)
     if not m:
         return None
     h = _num(m.group(1))
@@ -284,7 +287,8 @@ def handle(n: str, respond) -> bool:
     if not pide:
         # la respuesta a "¿a que hora quiere la alarma?" no dice "alarma"
         if _esperando_hora and time.time() - _esperando_hora < 40:
-            t = parse_hora(n)
+            sola = re.fullmatch(r"(?:jarvis )?(?:a )?" + _HORA + r"(?: (?:en punto|y media|y cuarto))?", n.strip(" ,."))
+            t = parse_hora(n) or (parse_hora("a las " + re.sub(r"^(?:jarvis )?(?:a )?", "", sola.group(0))) if sola else None)  # "6"
             if t:
                 _programar(t, respond)
                 return True

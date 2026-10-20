@@ -7,7 +7,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from jarvis import agent, brain, voice_config, voice_output
+from jarvis import agent, brain, en_vivo, voice_config, voice_output
 from jarvis.commands import handle_command
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -153,6 +153,29 @@ def index():
     return send_from_directory(WEB_DIR, "index.html")
 
 
+@app.route("/vivo")
+def vivo():
+    """Camara y microfono en vivo (en_vivo.py); el PIN lo pide la pagina."""
+    return send_from_directory(WEB_DIR, "vivo.html")
+
+
+@app.route("/api/vivo", methods=["POST"])
+def api_vivo():
+    """Oferta WebRTC del celular -> respuesta con el video y el audio."""
+    if not _token_ok():
+        return jsonify({"error": "PIN incorrecto"}), 401
+    data = request.get_json(silent=True) or {}
+    if not data.get("sdp") or data.get("type") != "offer":
+        return jsonify({"error": "falta la oferta"}), 400
+    try:
+        # por `tailscale serve` llega desde localhost; Tailscale dice que cuenta es
+        quien = request.headers.get("Tailscale-User-Login") if request.remote_addr == "127.0.0.1" else None
+        fuente = "cochera" if data.get("fuente") == "cochera" else "cuarto"
+        return jsonify(en_vivo.contestar(data["sdp"], data["type"], quien or request.remote_addr, fuente))
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 409
+
+
 @app.route("/api/health")
 def api_health():
     if not _token_ok():
@@ -241,7 +264,34 @@ def api_reset():
     return jsonify({"ok": True})
 
 
+def _esperar_puerto(host: str, port: int, segundos: float = 60) -> bool:
+    """Al reiniciar Jarvis, el anterior puede seguir cerrando con el puerto
+    tomado: werkzeug se rendia (sys.exit en este hilo) y el panel y la camara
+    en vivo quedaban caidos sin aviso. Se espera a que se libere."""
+    import logging
+    fin = time.time() + segundos
+    avisado = False
+    while True:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            if not avisado:
+                logging.getLogger("jarvis.alarma").warning(f"Panel: el puerto {port} sigue ocupado, espero a que se libere")
+                avisado = True
+            if time.time() > fin:
+                logging.getLogger("jarvis.alarma").error(f"Panel: el puerto {port} no se liberó; el panel queda apagado")
+                return False
+            time.sleep(2)
+        finally:
+            s.close()
+
+
 def run_server(host="0.0.0.0", port=DEFAULT_PORT):
+    if not _esperar_puerto(host, port):
+        return
     cert_file, key_file = _get_or_create_cert()
     print(f"[jarvis.server] Panel móvil (misma wifi): {mobile_url()}")
     print("[jarvis.server] Certificado autofirmado: el navegador avisará la primera vez (Avanzado > Continuar).")

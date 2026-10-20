@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
-from jarvis import aplausos, mic_config, stt_gpu, wakeword
+from jarvis import aplausos, en_vivo, mic_config, stt_gpu, wakeword
 
 SAMPLE_RATE = 16000
 FRAME = 512  # muestras por trama de audio (32 ms): el tamaño que exige el VAD Silero a 16 kHz
@@ -530,7 +530,9 @@ class VoiceListener:
         def callback(indata, frames, time_info, status):
             if status.input_overflow:
                 _perdidas[0] += 1
-            q.put(indata[:, 0].copy())
+            trama = indata[:, 0].copy()
+            q.put(trama)
+            en_vivo.escuchar(trama)  # el mismo audio a la cámara en vivo (si alguien mira)
 
         return sd.InputStream(
             samplerate=SAMPLE_RATE,
@@ -633,6 +635,8 @@ class VoiceListener:
                     # frase que termino con Jarvis hablando: es su eco (una orden
                     # real ya lo habria cortado con las palabras clave)
                     audio = audio[:0]
+                if audio.size and en_vivo.voz_remota_desde(began):
+                    audio = audio[:0]  # la voz del celular por las bocinas (en_vivo.py), no una orden
                 text = raw = ""
                 if follow_up and not self._speaking():
                     raw = self._safe_transcribe(audio, language)

@@ -320,20 +320,76 @@ _RECADO_DUENO = re.compile(
     r"(?:(?:un|este|el)\s+(?:recado|mensaje)\s+)?a\s+(?:mi\s+)?([\wáéíóúñ]+)[\s,:]+(?:que\s+)?(.+?)\s*$", re.IGNORECASE)
 
 
+def _programado(mensaje: str) -> tuple[datetime.datetime, str, str] | None:
+    """"a las 3 que la quiero", "en 2 horas que ya voy", "mañana a las 8 que...":
+    (cuándo, cómo decirlo, el mensaje). La hora tiene que ir ANTES del "que"
+    ("dile que la veo a las 8" se manda ya)."""
+    from . import recordatorios as rec
+    from .alarma import hora_hablada, parse_hora
+    m = re.match(r"^((?:ma[ñn]ana\s+|hoy\s+)?(?:a las?|a la|para las?|en|dentro de)\s+.+?)\s+que\s+(.+)$", mensaje, re.IGNORECASE)
+    if not m:
+        return None
+    n = _norm(m.group(1))
+    ahora = datetime.datetime.now()
+    if re.match(r"(?:hoy )?(?:en|dentro de) ", n):
+        d = rec.parse_duracion(n)
+        if not d:
+            return None
+        return ahora + d[0], f"en {rec.duracion_hablada(d[0])}", m.group(2).strip(" .")
+    at = parse_hora(n)
+    if at is None:
+        return None
+    if at.hour < 8 and not re.search(r"\b(?:manana|madrugada|noche)\b|\ba\.? ?m\b", n.split(" ", 1)[-1]):
+        at = at - datetime.timedelta(hours=12) if at - datetime.timedelta(hours=12) > ahora else at + datetime.timedelta(hours=12)
+    if n.startswith("manana") and at.date() == ahora.date():
+        at += datetime.timedelta(days=1)
+    dia = "mañana " if at.date() > ahora.date() else ""
+    return at, f"{dia}a {hora_hablada(at)}", m.group(2).strip(" .")
+
+
+# "dile que ya llegué" sin decir a quién: a la última persona con la que hubo recados
+# (2026-10-06 el dueño escribió "Dile que coma tierra", "Dile que ya llegué"... y se iban a la IA)
+_RECADO_SIN_NOMBRE = re.compile(
+    r"^(?:jarvis\W*)?(?:d[ií]le|d[ií]gale|m[aá]ndale|av[ií]sale|escr[ií]bele|coment[aá]le|p[aá]sale)\s+que\s+(.+?)\s*$",
+    re.IGNORECASE)
+_ULTIMO_CONTACTO_S = 30 * 60
+_ultimo_contacto: list = [None, 0.0]  # [chat_id, cuándo]
+
+
+def _contacto(cid) -> None:
+    _ultimo_contacto[:] = [str(cid), time.time()]
+
+
 def recado_del_dueno(texto: str) -> str | None:
     """"dile a mi novia que yo también" (por Telegram o por voz): se lo manda
     al invitado tal cual. None si no nombra a un invitado (así "dile a mi mamá"
     sigue yendo a WhatsApp)."""
     m = _RECADO_DUENO.match(texto.strip())
-    if not m:
-        return None
-    quien, mensaje = _norm(m.group(1)), m.group(2).strip(" .")
-    destino = [(cid, d) for cid, d in _invitados().items() if _norm(d["nombre"]).split()[-1] == quien]
+    if m:
+        quien, mensaje = _norm(m.group(1)), m.group(2).strip(" .")
+        destino = [(cid, d) for cid, d in _invitados().items() if _norm(d["nombre"]).split()[-1] == quien]
+    else:
+        m = _RECADO_SIN_NOMBRE.match(texto.strip())
+        cid, cuando = _ultimo_contacto
+        if not m:
+            return None
+        if not cid or time.time() - cuando > _ULTIMO_CONTACTO_S:
+            return "¿A quién se lo mando? Por ejemplo: «dile a mi novia que ya llegué»."
+        mensaje = m.group(1).strip(" .")
+        destino = [(c, d) for c, d in _invitados().items() if str(c) == cid]
     if not destino or not mensaje:
         return None
+    prog = _programado(mensaje)  # "mándale a mi novia a las 3 que la quiero": a esa hora (novia.py)
+    if prog:
+        from . import novia
+        at, cuando, mensaje = prog
+        for cid, _ in destino:
+            novia.programar(int(cid), at, mensaje)
+        return f"Listo, se lo mando a tu {destino[0][1]['nombre']} {cuando}: «{mensaje}»."
     for cid, d in destino:
         telegram.enviar(f"💬 {_dueno()} le manda decir: «{mensaje}»", chat_id=int(cid))
         log.info(f"Invitados: recado del dueño para {d['nombre']}")
+        _contacto(cid)
     return f"Listo, ya se lo mandé a tu {destino[0][1]['nombre']}."
 
 
@@ -342,6 +398,10 @@ def comando_dueno(texto: str) -> str | None:
     recado = recado_del_dueno(texto)
     if recado:
         return recado
+    from . import novia
+    r = novia.comando_dueno(texto)
+    if r:
+        return r
     n = _norm(texto)
     if re.search(r"^(?:invitados|quien (?:mas )?tiene acceso|lista de invitados)$", n):
         inv = _invitados()
@@ -524,6 +584,9 @@ def _ayuda_novia() -> str:
             f"⏰ Recordatorios para {d}: «recuérdale a {d} que me llame a las 9», «recuérdale a {d} comer en una hora».\n"
             "📋 «mis recordatorios» para verlos y «cancela mis recordatorios» para borrarlos.\n"
             "😄 Chistes: «cuéntame un chiste».\n"
+            "🧠 Datos curiosos: «cuéntame algo curioso».\n"
+            "🎯 Trivia: «trivia» (le llevo el marcador: «mi marcador»).\n"
+            "🔕 «ya no me mandes mensajes» si prefiere que no le escriba por mi cuenta.\n"
             "❓ «ayuda»: esta lista.")
 
 
@@ -727,6 +790,12 @@ def atender(chat_id: int, texto: str) -> str | None:
     """Mensaje de un invitado. Devuelve la respuesta (texto) o None si ya se
     mandó algo (la foto)."""
     resp = _atender(chat_id, texto)
+    # también las respuestas fijas (chiste, dato, clima...) van al historial: sin
+    # eso, a "otro" justo después de un chiste la IA no sabía de qué se hablaba
+    hist = _historial.setdefault(chat_id, [])
+    if resp and not (hist and hist[-1]["role"] == "assistant" and hist[-1]["content"] == resp):
+        hist += [{"role": "user", "content": texto}, {"role": "assistant", "content": resp}]
+        del hist[:-HISTORIAL]
     return adaptar(chat_id, resp) if resp else resp
 
 
@@ -738,6 +807,10 @@ def _atender(chat_id: int, texto: str) -> str | None:
     n = _norm(texto)
     log.info(f"Invitados: {nombre(chat_id)}: {texto!r}")
     if es_novia(chat_id):
+        from . import novia
+        r = novia.atender(chat_id, n)
+        if r is not None:
+            return r or None
         if n in ("start", "ayuda", "help", "comandos", "que puedes hacer", "que haces", "que sabes hacer",
                  "para que sirves", "menu"):
             return _ayuda_novia()
@@ -750,6 +823,7 @@ def _atender(chat_id: int, texto: str) -> str | None:
         telegram.enviar(f"💬 Recado de tu {nombre(chat_id)}: «{texto.strip()}»")
         _al_reloj(chat_id, f"Recado de tu {nombre(chat_id)}", texto.strip())
         log.info(f"Invitados: recado de {nombre(chat_id)} para el dueño")
+        _contacto(chat_id)
         return _sir(f"Ya se lo mandé a {_dueno()}")
     if n in ("start", "ayuda", "help", "que puedes hacer", "que haces", "que sabes hacer", "para que sirves"):
         return (f"Puedo platicar con usted, decirle la hora, la fecha o el clima, contarle un chiste, y mandarle una "
@@ -764,9 +838,23 @@ def _atender(chat_id: int, texto: str) -> str | None:
         from .commands import _DIAS, _MESES
         hoy = datetime.date.today()
         return _sir(f"Hoy es {_DIAS[hoy.weekday()]} {hoy.day} de {_MESES[hoy.month - 1]}")
-    from . import chistes, weather
+    from . import charla, chistes, curiosidades, noticias, weather
+    recientes = [m["content"] for m in _historial.get(chat_id, []) if m["role"] == "assistant"][-4:]
+    trato = "señorita" if es_novia(chat_id) else "señor"
+    # "otro" / "sí" tras un chiste o un dato: el siguiente (no a la IA, que no entendía "otro")
+    if charla.sigue_chiste(texto, recientes):
+        return chistes.uno()
+    if charla.sigue_dato(texto, recientes):
+        return curiosidades.una(trato)
     if chistes.es_pedido(n):
         return chistes.uno()
+    # noticias (el papá preguntó por la tormenta Simón y por el penal): titulares tal cual, como al dueño
+    ultimo = recientes[-1] if recientes else ""
+    if ultimo in noticias.dichas and noticias.hay_mas() and (charla.pide_otro(texto) or charla.acepta(texto)
+                                                             or charla.pide_contar(texto)):
+        return noticias.mas(trato)
+    if noticias.es_pedido(n) and not re.search(_PRIVADO, n) and not re.search(rf"\b{re.escape(_norm(_dueno()))}\b", n):
+        return noticias.responder(n, trato)
     if weather.is_weather_request(n):
         return _sir(weather.answer(n))
     if re.search(_PRIVADO, n):

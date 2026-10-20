@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Jarvis · En vivo</title>
+<style>
+  :root { --cian: #21e6ff; --texto: #cfefff; --fondo: #02060c; --rojo: #ff4d6d; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--fondo); color: var(--texto);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; align-items: center; padding: 16px;
+  }
+  h1 { font-size: 18px; letter-spacing: 4px; color: var(--cian); margin: 4px 0 12px; }
+  .marco {
+    position: relative; width: 100%; max-width: 960px; aspect-ratio: 16 / 9;
+    border: 1px solid rgba(33, 230, 255, 0.35); border-radius: 12px; overflow: hidden;
+    background: #000; box-shadow: 0 0 24px rgba(33, 230, 255, 0.15);
+  }
+  video { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .vivo {
+    position: absolute; top: 10px; left: 10px; padding: 3px 8px; border-radius: 6px;
+    background: rgba(0, 0, 0, 0.6); font-size: 12px; letter-spacing: 1px; display: none;
+  }
+  .vivo::before { content: "● "; color: var(--rojo); }
+  .estado { margin: 12px 0; font-size: 14px; opacity: 0.85; text-align: center; min-height: 1.2em; }
+  .botones { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .fuentes { display: flex; gap: 6px; margin-bottom: 12px; }
+  .fuentes button { padding: 7px 16px; font-size: 14px; opacity: 0.6; }
+  .fuentes button.elegida { opacity: 1; background: rgba(33, 230, 255, 0.25); border-color: var(--cian); }
+  button, input {
+    font: inherit; font-size: 15px; padding: 10px 18px; border-radius: 20px;
+    border: 1px solid rgba(33, 230, 255, 0.45); background: rgba(33, 230, 255, 0.08); color: var(--texto);
+  }
+  button { cursor: pointer; }
+  input { width: 120px; text-align: center; letter-spacing: 6px; }
+  .oculto { display: none !important; }
+  .hablar {
+    margin: 14px 0 4px; width: 100%; max-width: 360px; padding: 18px; border-radius: 40px;
+    font-size: 17px; letter-spacing: 1px; user-select: none; -webkit-user-select: none;
+    touch-action: none; -webkit-touch-callout: none;
+    border-color: rgba(33, 230, 255, 0.6); background: rgba(33, 230, 255, 0.12);
+    transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
+  }
+  .hablar.activo {
+    background: rgba(255, 77, 109, 0.25); border-color: var(--rojo);
+    box-shadow: 0 0 24px rgba(255, 77, 109, 0.5); transform: scale(0.98);
+  }
+  .hablar:disabled { opacity: 0.4; }
+  a { color: var(--cian); font-size: 13px; margin-top: 16px; }
+</style>
+</head>
+<body>
+  <h1>JARVIS · EN VIVO</h1>
+  <div class="fuentes">
+    <button type="button" data-fuente="cuarto">🛏 Cuarto</button>
+    <button type="button" data-fuente="cochera">🚗 Cochera</button>
+  </div>
+
+  <div class="marco">
+    <video id="video" autoplay playsinline muted></video>
+    <div id="vivo" class="vivo">EN VIVO</div>
+  </div>
+  <div id="estado" class="estado">Conectando…</div>
+
+  <div id="pin" class="botones oculto">
+    <input id="pinInput" type="text" inputmode="numeric" maxlength="4" placeholder="PIN" autocomplete="off">
+    <button id="pinBtn" type="button">Entrar</button>
+  </div>
+  <button id="hablar" class="hablar" type="button" disabled>🎙 Mantén para hablar</button>
+  <div class="botones">
+    <button id="sonido" type="button">🔊 Activar sonido</button>
+    <button id="reconectar" type="button" class="oculto">↻ Reconectar</button>
+  </div>
+  <a href="/">← Volver al panel</a>
+
+<script>
+const TOKEN_KEY = "jarvis_token";
+const url = new URL(location.href);
+let token = url.searchParams.get("token") || localStorage.getItem(TOKEN_KEY) || "";
+if (url.searchParams.get("token")) {
+  localStorage.setItem(TOKEN_KEY, token);
+  history.replaceState(null, "", "/vivo"); // que el PIN no quede en la barra
+}
+
+const $ = (id) => document.getElementById(id);
+const video = $("video");
+let pc = null;
+let voz = null; // el transceptor de audio: recibe el micro de la casa y manda el del celular
+let micro = null; // el micrófono del celular, solo mientras se presiona
+let presionado = false;
+const FUENTE_KEY = "jarvis_vivo_fuente";
+let fuente = localStorage.getItem(FUENTE_KEY) === "cochera" ? "cochera" : "cuarto";
+
+function marcarFuente() {
+  document.querySelectorAll(".fuentes button").forEach((b) => b.classList.toggle("elegida", b.dataset.fuente === fuente));
+}
+document.querySelectorAll(".fuentes button").forEach((b) => {
+  b.onclick = () => {
+    if (b.dataset.fuente === fuente) return;
+    fuente = b.dataset.fuente;
+    localStorage.setItem(FUENTE_KEY, fuente);
+    marcarFuente();
+    conectar(); // otra cámara = otra conexión (el audio sigue siendo el del cuarto)
+  };
+});
+marcarFuente();
+
+function estado(texto) { $("estado").textContent = texto; }
+
+function esperarCandidatos(conexion) {
+  // aiortc no recibe candidatos sueltos: la oferta va completa
+  if (conexion.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((listo) => {
+    const t = setTimeout(listo, 2500);
+    conexion.addEventListener("icegatheringstatechange", () => {
+      if (conexion.iceGatheringState === "complete") { clearTimeout(t); listo(); }
+    });
+  });
+}
+
+async function conectar() {
+  if (!token) { $("pin").classList.remove("oculto"); estado("Escriba el PIN de Jarvis"); return; }
+  $("reconectar").classList.add("oculto");
+  $("vivo").style.display = "none";
+  $("hablar").disabled = true;
+  soltar();
+  if (pc) { pc.onconnectionstatechange = null; pc.close(); } // la vieja no debe pisar el estado de la nueva
+  estado("Conectando…");
+  pc = new RTCPeerConnection({ iceServers: [] });
+  const flujo = new MediaStream();
+  video.srcObject = flujo;
+  pc.addTransceiver("video", { direction: "recvonly" });
+  voz = pc.addTransceiver("audio", { direction: "sendrecv" });
+  pc.ontrack = (e) => flujo.addTrack(e.track);
+  pc.onconnectionstatechange = () => {
+    const s = pc.connectionState;
+    if (s === "connected") { estado(""); $("vivo").style.display = "block"; $("hablar").disabled = false; }
+    else if (s === "failed" || s === "disconnected" || s === "closed") {
+      $("vivo").style.display = "none";
+      $("hablar").disabled = true;
+      soltar();
+      estado(s === "failed" ? "No se pudo conectar. ¿Tailscale está prendido en el celular?" : "Se cortó la transmisión");
+      $("reconectar").classList.remove("oculto");
+    }
+  };
+  try {
+    await pc.setLocalDescription(await pc.createOffer());
+    await esperarCandidatos(pc);
+    const res = await fetch("/api/vivo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Jarvis-Token": token },
+      body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type, fuente }),
+    });
+    const datos = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      token = ""; localStorage.removeItem(TOKEN_KEY);
+      $("pin").classList.remove("oculto");
+      estado("PIN incorrecto");
+      return;
+    }
+    if (!res.ok) throw new Error(datos.error || "el servidor no respondió");
+    await pc.setRemoteDescription(datos);
+    estado("Conectando video…");
+  } catch (err) {
+    estado("Error: " + err.message);
+    $("reconectar").classList.remove("oculto");
+  }
+}
+
+$("pinBtn").onclick = () => {
+  const v = $("pinInput").value.trim();
+  if (!v) return;
+  token = v; localStorage.setItem(TOKEN_KEY, v);
+  $("pin").classList.add("oculto");
+  conectar();
+};
+$("sonido").onclick = () => {
+  video.muted = !video.muted;
+  video.play().catch(() => {});
+  $("sonido").textContent = video.muted ? "🔊 Activar sonido" : "🔇 Silenciar";
+};
+$("reconectar").onclick = conectar;
+
+// walkie-talkie: mientras se mantiene, la voz sale por las bocinas de la casa
+async function presionar(e) {
+  e.preventDefault();
+  if (presionado || !voz || $("hablar").disabled) return;
+  presionado = true;
+  $("hablar").classList.add("activo");
+  $("hablar").textContent = "🔴 Hablando… se oye en la casa";
+  try {
+    const m = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    if (!presionado) { m.getTracks().forEach((t) => t.stop()); return; } // ya lo soltó
+    micro = m;
+    await voz.sender.replaceTrack(m.getAudioTracks()[0]);
+  } catch (err) {
+    estado("No pude usar el micrófono: " + err.message);
+    soltar();
+  }
+}
+
+function soltar() {
+  presionado = false;
+  $("hablar").classList.remove("activo");
+  $("hablar").textContent = "🎙 Mantén para hablar";
+  if (voz) voz.sender.replaceTrack(null).catch(() => {});
+  if (micro) { micro.getTracks().forEach((t) => t.stop()); micro = null; }
+}
+
+const boton = $("hablar");
+boton.addEventListener("pointerdown", presionar);
+["pointerup", "pointercancel", "pointerleave"].forEach((ev) => boton.addEventListener(ev, soltar));
+boton.addEventListener("contextmenu", (e) => e.preventDefault());
+window.addEventListener("pagehide", () => { soltar(); if (pc) pc.close(); });
+// otra app o pestaña: se corta (no ocupa lugar ni CPU); al volver, se reconecta
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    soltar();
+    if (pc) { pc.onconnectionstatechange = null; pc.close(); pc = null; }
+    $("vivo").style.display = "none";
+    $("hablar").disabled = true;
+  } else if (token) {
+    conectar();
+  }
+});
+
+conectar();
+</script>
+</body>
+</html>

@@ -1,8 +1,10 @@
 import datetime
 import random
 import re
+import threading
+from pathlib import Path
 
-from . import (actions, agent, alarma, brain, camara, charla, chistes, curiosidades, demo, entrada, interrupt, memory, music, personalidad,
+from . import (actions, agent, alarma, brain, camara, charla, cochera, chistes, curiosidades, demo, en_vivo, entrada, interrupt, memory, mensajes, music, noticias, personalidad,
                recordatorios, system, tv, vigilancia, weather, whatsapp)
 
 EXIT_WORDS = [
@@ -171,7 +173,37 @@ def _charla_rapida(t: str) -> str | None:
     return None
 
 
+_CONVERSACIONES = Path(__file__).resolve().parent.parent / "logs" / "dueno"
+_conv_lock = threading.Lock()
+
+
+def _anotar_conversacion(quien: str, texto: str):
+    """logs/dueno/AAAA-MM-DD.log: lo que dijo el dueño y lo que contestó Jarvis (voz,
+    Telegram, celular, reloj), para revisar dónde se equivocó y pulirlo (2026-10-09)."""
+    texto = re.sub(r"\s+", " ", str(texto)).strip()
+    if not texto:
+        return
+    try:
+        ahora = datetime.datetime.now()
+        with _conv_lock:
+            _CONVERSACIONES.mkdir(parents=True, exist_ok=True)
+            with open(_CONVERSACIONES / f"{ahora:%Y-%m-%d}.log", "a", encoding="utf-8") as f:
+                f.write(f"{ahora:%H:%M:%S}  {quien}: {texto}\n")
+    except OSError:
+        pass
+
+
 def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
+    """handle_command que además deja la plática en logs/dueno/."""
+    _anotar_conversacion("Yair", text)
+
+    def respond_y_anota(msg, *args, **kwargs):
+        _anotar_conversacion("Jarvis", msg)
+        return respond(msg, *args, **kwargs)
+    return _handle_command(text, respond_y_anota, escuchar, hud)
+
+
+def _handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
     """Ejecuta el comando reconocido. respond() se usa para cada mensaje de
     salida (por defecto solo imprime; main.py le pasa una version que ademas
     habla). escuchar(), si se pasa, graba y transcribe una respuesta corta
@@ -205,9 +237,29 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
     if recado:
         respond(recado.replace("tu ", "su ", 1).rstrip(".") + ", señor.")
         return True
+    from . import novia
+    r = novia.comando_dueno(text)
+    if r:
+        respond(r)
+        return True
 
     # "Jarvis, ya llegue" + dos aplausos: la entrada de Iron Man (entrada.py)
     if entrada.handle(t, respond, hud):
+        return True
+
+    # noticias: titulares de Google Noticias leídos tal cual, Mazatlán primero (noticias.py).
+    # "¿qué más?" / "sí" justo después = los siguientes titulares
+    recientes = agent.recientes()
+    tras_noticias = bool(recientes) and recientes[-1] in noticias.dichas and noticias.hay_mas()
+    if noticias.es_pedido(t) or (tras_noticias and (charla.pide_contar(text) or re.fullmatch(
+            r"(?:si|sale|va|ok|okay|dale|claro|(?:quiero |dame |dime |lee )?(?:mas|otras?|las? (?:siguientes?|demas)))(?: (?:por favor|porfa|jarvis))?", t))):
+        if noticias.es_pedido(t):
+            respond(_sir("Buscando noticias"))
+            resp = noticias.responder(t)
+        else:
+            resp = noticias.mas()
+        respond(resp)
+        agent.anotar(text, resp)
         return True
 
     rapida = _charla_rapida(t)
@@ -216,6 +268,12 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
         return True
     # "¿cómo estás?", "bien", "jaja"...: frases fijas que no arremedan ni se repiten (charla.py)
     recientes = agent.recientes()
+    # "otro" / "sí" justo después de un chiste o un dato: el siguiente (la IA no entendía "otro")
+    if charla.sigue_chiste(text, recientes) or charla.sigue_dato(text, recientes):
+        resp = chistes.uno() if charla.sigue_chiste(text, recientes) else curiosidades.una("señor")
+        respond(resp)
+        agent.anotar(text, resp)
+        return True
     rapida = charla.rapida(text, "señor", recientes, acks=False)
     if rapida:
         respond(rapida)
@@ -236,7 +294,9 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
 
     # chistes de una lista fija (ver chistes.py): la IA chica los contaba mal
     if chistes.es_pedido(t) and not re.search(r"\b(?:youtube|video|whatsapp|mensaje)\b", t):
-        respond(chistes.uno())
+        chiste = chistes.uno()
+        respond(chiste)
+        agent.anotar(text, chiste)  # para entender "otro" o "jaja" después
         return True
 
     # "pausa", "silencio", "para la musica", "callate"... (por voz, main.py ya
@@ -280,11 +340,23 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
         return True
 
     # modo vigilancia y "¿quien vino mientras no estaba?" (vigilancia.py)
+    # "foto de la cochera": antes que vigilancia (que se quedaria con "foto")
+    if cochera.handle(t, respond):
+        return True
+
+    # "camara en vivo": antes que vigilancia y camara (que se quedarian con "camara")
+    if en_vivo.handle(t, respond):
+        return True
+
     if vigilancia.handle(t, respond):
         return True
 
     # "¿cuanto llevo jugando?", "sin comentarios" (personalidad.py)
     if personalidad.handle(t, respond):
+        return True
+
+    # "no me mandes mensajes", "resumen del dia", "¿cuanto falta para mi cumpleaños?" (mensajes.py)
+    if mensajes.handle(t, respond):
         return True
 
     # la tele de la sala y los modos musica/juego: antes que system, que si no
@@ -335,7 +407,7 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
         if whatsapp.send_message(contacto, mensaje):
             respond(_sir("Mensaje enviado"))
         else:
-            respond(_sir(f"No pude encontrar a {contacto} o enviar el mensaje en WhatsApp Web"))
+            respond(_sir(f"No pude encontrar a {contacto} en WhatsApp o mandarle el mensaje"))
         return True
 
     if t.startswith("pon ") or t.startswith("reproduce ") or "video de" in t or "cancion de" in t:

@@ -5,8 +5,6 @@ piper-tts
 sounddevice
 numpy
 soundfile
-selenium
-webdriver-manager
 textual
 flask
 qrcode[pil]
@@ -15,3 +13,4 @@ requests
 zeroconf
 python-xlib
 mediapipe  # trae opencv-contrib-python (camara.py)
+aiortc  # camara y microfono en vivo al celular (en_vivo.py)

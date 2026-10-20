@@ -709,3 +709,7 @@ html, body {
 .voice-panel-close:hover {
   opacity: 1;
 }
+
+.vivo-btn {
+  text-decoration: none;
+}

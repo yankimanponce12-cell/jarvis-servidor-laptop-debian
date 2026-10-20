@@ -97,8 +97,17 @@ def handle(n: str, respond) -> bool:
             return True
         return _spotify_on_tv(n, respond)
     # whisper a veces oye "moda juego", "mada juego", "modo juegos"
-    if re.search(r"\bm[oa]d[oa] (?:juegos?|gamer|play|playstation|ps5)\b", n):
-        if re.search(r"\b(?:quita|termina|sal|salir|apaga|cancela)\b", n):
+    # "prende la ps5 / el play / el playstation", "pon la play", "apaga la consola" (2026-10-06 el
+    # usuario lo pidió así tres veces y nada): es el modo juego. Con "tele" en la frase es la entrada (abajo).
+    # 2026-10-12 tampoco salio "abre el playstation" ni "apaga el play" mal oido por whisper
+    # ("apay el play", "apala el play", "aparel play"): "apa..." pegado al play es apagar.
+    consola = re.search(r"\b(?:ps5|ps 5|playstation|play station|consola)\b|\b(?:la|el) play\b", n)
+    apaga_mal_oido = re.search(r"\bapa\w*\W+(?:(?:el|la)\W+)?(?:play|playstation|consola)\b", n)
+    pide_consola = consola and not re.search(_TV, n) and re.search(
+        r"\b(?:prende|prendeme|prendela|prendelo|enciende|enciendela|enciendelo|pon|ponme|arranca|apaga|apagala|apagalo|quita"
+        r"|abre|abreme|abrela|abrelo)\b|\b(?:quiero|vamos a|voy a) jugar\b|\bjuguemos\b", n)
+    if pide_consola or apaga_mal_oido or re.search(r"\bm[oa]d[oa] (?:juegos?|gamer|play|playstation|ps5)\b", n):
+        if apaga_mal_oido or re.search(r"\b(?:quita|termina|sal|salir|apaga|apagala|apagalo|cancela)\b", n):
             pantalla_tele.audio_to_laptop()
             ok, msg = _run("modo-juego", "off", timeout=90)
             respond(_sir("Apagué la consola y la tele") if ok else _sir(f"No pude apagarlas: {msg}"))
@@ -152,6 +161,12 @@ def handle(n: str, respond) -> bool:
     if re.search(r"\bvolumen\b|\b(?:subele|bajale)\b", n):
         up = bool(re.search(r"\b(?:sube|subele|subir|mas alto|aumenta)\b", n))
         down = bool(re.search(r"\b(?:baja|bajale|bajar|mas bajo|disminuye)\b", n))
+        # "a 50", "al 80%": dejarlo EN ese número (antes subía 30 pasos: "a 50" se tomaba como pasos)
+        nivel = re.search(r"\b(?:a|al|en|hasta)\s+(?:el\s+)?(\d{1,3})\b", n)
+        if nivel and int(nivel.group(1)) <= 100:
+            ok, msg = pantalla_tele.tele_js("volumen", nivel.group(1))
+            respond(_sir(f"Volumen de la tele en {nivel.group(1)}") if ok else _sir(f"No pude: {msg}"))
+            return True
         if up == down:
             return False
         steps = _steps(n)
@@ -166,8 +181,9 @@ def handle(n: str, respond) -> bool:
         _run("tele", "play")
         respond(_sir("Listo"))
         return True
-    if re.search(r"\b(?:como esta|esta prendida|esta encendida|esta apagada)\b", n):
-        ok, msg = _run("tele", "estado")
-        respond(_sir("La tele está encendida") if "ENCENDIDA" in msg else _sir("La tele está apagada"))
+    # "¿está la tele prendida?", "¿la tele está apagada?", "¿cómo está la tele?"
+    if re.search(r"\b(?:como esta|prendida|encendida|apagada|esta prendida)\b", n):
+        from . import avisos  # el puerto 9197 solo abre con la tele prendida (PowerState miente)
+        respond(_sir("La tele está encendida") if avisos.tele_encendida() else _sir("La tele está apagada"))
         return True
     return False

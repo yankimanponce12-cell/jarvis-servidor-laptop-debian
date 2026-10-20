@@ -66,3 +66,9 @@ recordatorios.json
 vigilancia.json
 visitas.json
 personalidad.json
+mensajes.json
+mensajes_estado.json
+wa_config.json
+wa_sidecar/datos/
+cochera_config.json
+novia_estado.json
