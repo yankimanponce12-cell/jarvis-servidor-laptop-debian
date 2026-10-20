@@ -1,4 +1,5 @@
 import logging
+import os
 import queue
 import socket
 import threading
@@ -38,6 +39,33 @@ WATCH_PORT = 80
 WATCH_ROUTE = "/jarvis"
 WEATHER_ROUTE = "/weather"  # separado de /jarvis: el clima no toca el estado de la conversacion
 HTTP_TIMEOUT = 0.7       # sub-segundo: nunca debe sentirse lento si el reloj no responde
+# El firmware de GitHub (2026-10-20) pide la clave API_TOKEN de su secrets.h en el encabezado
+# X-Token; sin ella contesta 401 a todo y el reloj muestra "SIN JARVIS". Va en reloj_token.txt
+# (ignorado por git) o en JARVIS_RELOJ_TOKEN. El firmware viejo la ignora.
+TOKEN_FILE = PROJECT_ROOT / "reloj_token.txt"
+_sin_clave_avisado = False
+
+
+def _headers() -> dict:
+    token = os.environ.get("JARVIS_RELOJ_TOKEN", "")
+    if not token:
+        try:
+            token = TOKEN_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+    return {"X-Token": token} if token else {}
+
+
+def _revisar_clave(r: requests.Response) -> bool:
+    """False (y una sola línea en el log) si el reloj rechazó la clave."""
+    global _sin_clave_avisado
+    if r.status_code != 401:
+        _sin_clave_avisado = False
+        return True
+    if not _sin_clave_avisado:
+        _sin_clave_avisado = True
+        logger.error(f"El reloj rechazó la clave (401): pon el API_TOKEN de su secrets.h en {TOKEN_FILE.name}")
+    return False
 MDNS_TIMEOUT_MS = 3000  # con 1500 a veces no alcanzaba (2026-10-04)
 
 _zeroconf = None
@@ -96,7 +124,8 @@ def _post(payload: dict, route: str = WATCH_ROUTE):
         return
 
     try:
-        requests.post(f"http://{ip}:{WATCH_PORT}{route}", json=payload, timeout=HTTP_TIMEOUT)
+        _revisar_clave(requests.post(f"http://{ip}:{WATCH_PORT}{route}", json=payload, headers=_headers(),
+                                     timeout=HTTP_TIMEOUT))
         return
     except requests.RequestException:
         # la IP cacheada puede haber quedado vieja (el reloj se reinicio,
@@ -109,7 +138,8 @@ def _post(payload: dict, route: str = WATCH_ROUTE):
     if ip is None:
         return
     try:
-        requests.post(f"http://{ip}:{WATCH_PORT}{route}", json=payload, timeout=HTTP_TIMEOUT)
+        _revisar_clave(requests.post(f"http://{ip}:{WATCH_PORT}{route}", json=payload, headers=_headers(),
+                                     timeout=HTTP_TIMEOUT))
     except requests.RequestException as exc:
         logger.error(f"No se pudo mandar el estado al reloj: {exc}")
 
@@ -170,7 +200,9 @@ def get_eventos(timeout: float = 1.5) -> dict | None:
     if ip is None:
         return None
     try:
-        r = requests.get(f"http://{ip}:{WATCH_PORT}/eventos", timeout=timeout)
+        r = requests.get(f"http://{ip}:{WATCH_PORT}/eventos", headers=_headers(), timeout=timeout)
+        if not _revisar_clave(r):
+            return None  # el reloj sí está: no se borra la IP
         return r.json() if r.ok else None
     except (requests.RequestException, ValueError):
         global _cached_ip

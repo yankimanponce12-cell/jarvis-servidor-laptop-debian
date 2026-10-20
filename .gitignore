@@ -72,3 +72,6 @@ wa_config.json
 wa_sidecar/datos/
 cochera_config.json
 novia_estado.json
+
+# clave API_TOKEN del reloj (secrets.h del firmware)
+reloj_token.txt
