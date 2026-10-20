@@ -129,7 +129,7 @@ def x11_window_exists(cls: str) -> bool:
         return False
 
 
-def move_to_tv(cls: str, wait: float = 20) -> bool:
+def move_to_tv(cls: str, wait: float = 20) -> tuple[bool, str]:
     """Pasa la ventana X11 de `cls` al monitor de la tele (el que no es el
     principal) y la pone en pantalla completa."""
     from Xlib import X, protocol
@@ -137,7 +137,7 @@ def move_to_tv(cls: str, wait: float = 20) -> bool:
     try:
         d = _xdisplay()
     except Exception:
-        return False
+        return False, "no pude hablar con la pantalla"
     try:
         root = d.screen().root
         end = time.time() + wait
@@ -146,9 +146,16 @@ def move_to_tv(cls: str, wait: float = 20) -> bool:
             time.sleep(0.2)
             w = _find_window(d, cls)
         if w is None:
-            return False
-        mons = randr.get_monitors(root).monitors
-        others = [m for m in mons if not m.primary] or mons
+            return False, "no encontré la ventana de Spotify"
+        # recién prendida, la tele tarda unos segundos en aparecer como monitor (hotplug del HDMI);
+        # sin ella, max() tronaba con la lista vacía (2026-10) o la ventana se quedaba en la laptop
+        end = time.time() + 8
+        others = [m for m in randr.get_monitors(root).monitors if not m.primary]
+        while not others and time.time() < end:
+            time.sleep(0.5)
+            others = [m for m in randr.get_monitors(root).monitors if not m.primary]
+        if not others:
+            return False, "no veo la tele conectada a la laptop"
         tv = max(others, key=lambda m: m.width_in_pixels * m.height_in_pixels)
 
         def send(type_, data):
@@ -165,7 +172,7 @@ def move_to_tv(cls: str, wait: float = 20) -> bool:
         time.sleep(0.3)
         send("_NET_WM_STATE", [1, fs, 0, 1])
         send("_NET_ACTIVE_WINDOW", [2, X.CurrentTime, 0])
-        return True
+        return True, ""
     finally:
         d.close()
 
@@ -189,8 +196,9 @@ def open_spotify_on_tv(timeout: float = 30) -> tuple[bool, str]:
         time.sleep(2)
     if not spotify_running():
         subprocess.Popen(SPOTIFY_CMD, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    if not move_to_tv("spotify", wait=timeout):
-        return False, "no encontré la ventana de Spotify"
+    ok, msg = move_to_tv("spotify", wait=timeout)
+    if not ok:
+        return False, msg
     end = time.time() + timeout
     while not spotify_running() and time.time() < end:
         time.sleep(0.3)

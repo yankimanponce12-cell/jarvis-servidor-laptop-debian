@@ -6,14 +6,17 @@
   reconoce, la vigilancia se apaga sola y Jarvis le cuenta quién vino.
 - "¿Quién vino mientras no estaba?" / "¿alguien entró?": las llegadas de las
   últimas horas, conocidas y sin reconocer.
+- "Enséñame quién entró" / "fotos de la vigilancia": vuelve a mandar al celular
+  las fotos de los intrusos de las últimas 24 horas.
 
 Las llegadas las detecta camara.py (alguien aparece tras AUSENTE_S sin ver a
 nadie). Sin caras aprendidas no se puede saber quién es: cualquier llegada
 cuenta como desconocida (se avisa al activar).
 
 Se guarda en vigilancia.json (activa o no) y visitas.json (las últimas
-MAX_VISITAS llegadas/salidas), los dos ignorados por git. No se guardan
-fotos: la de la alerta solo se manda por Telegram."""
+MAX_VISITAS llegadas/salidas), los dos ignorados por git. Solo se guardan las
+fotos de los intrusos (logs/vigilancia/, ignorado por git): las últimas
+MAX_FOTOS y no más de DIAS_FOTOS días."""
 
 import datetime
 import json
@@ -33,6 +36,9 @@ VISITAS_FILE = DATOS / "visitas.json"
 MAX_VISITAS = 300
 SEGUNDA_FOTO_S = 4  # una segunda foto unos segundos después (la primera puede salir movida o de lado)
 DUENO = "dueno"  # la clave con que camara.py guarda la cara del dueño
+FOTOS_DIR = DATOS / "logs" / "vigilancia"
+MAX_FOTOS = 20
+DIAS_FOTOS = 7
 _lock = threading.Lock()
 
 
@@ -161,9 +167,10 @@ def desactivar(respond=None, motivo: str = "") -> bool:
     if respond:
         extranos = [t for t in visitas_extranas(48) if desde is None or t >= desde]
         if extranos:
+            horas_txt = ", ".join(f"{t:%H:%M}" for t in extranos[-5:])
             respond(_sir(f"Vigilancia desactivada. Mientras no estaba, entró alguien que no reconocí "
-                         f"{'a las ' + extranos[0].strftime('%H:%M') if len(extranos) == 1 else str(len(extranos)) + ' veces'}"
-                         ". Le mandé las fotos al celular"))
+                         f"{'a las ' + horas_txt if len(extranos) == 1 else f'{len(extranos)} veces: a las {horas_txt}'}"
+                         ". Le mandé las fotos al celular; si quiere verlas otra vez, dígame «enséñame quién entró»"))
         else:
             respond(_sir("Vigilancia desactivada. Nadie entró mientras no estaba"))
     return True
@@ -180,6 +187,7 @@ def en_llegada(nombre: str | None, respond) -> bool:
         desactivar(respond, "(volvió el dueño)")
         return True
     foto = cam.foto() if cam is not None else None
+    _guardar_foto(foto)
     hora = datetime.datetime.now().strftime("%H:%M")
     quien = "alguien que no reconozco" if cam is not None and cam.tiene_caras else "alguien (aún no conozco su cara)"
     avisos.avisar(f"⚠ Vigilancia: entró {quien} al cuarto a las {hora}.", foto)
@@ -187,6 +195,7 @@ def en_llegada(nombre: str | None, respond) -> bool:
     def segunda():
         time.sleep(SEGUNDA_FOTO_S)
         f2 = cam.foto() if cam is not None else None
+        _guardar_foto(f2)
         if f2:
             avisos.avisar("📷 Unos segundos después:", f2)
 
@@ -196,13 +205,56 @@ def en_llegada(nombre: str | None, respond) -> bool:
 
 
 # ------------------------------------------------------------------- foto --
+def _guardar_foto(jpg: bytes | None):
+    """Guarda la foto de un intruso (para "enséñame quién entró") y borra las viejas."""
+    if not jpg:
+        return
+    try:
+        FOTOS_DIR.mkdir(parents=True, exist_ok=True)
+        ahora = datetime.datetime.now()
+        (FOTOS_DIR / f"{ahora:%Y%m%d-%H%M%S}.jpg").write_bytes(jpg)
+        limite = (ahora - datetime.timedelta(days=DIAS_FOTOS)).strftime("%Y%m%d-%H%M%S")
+        fotos = sorted(FOTOS_DIR.glob("*.jpg"))
+        for vieja in fotos[:-MAX_FOTOS] + [f for f in fotos[-MAX_FOTOS:] if f.stem < limite]:
+            vieja.unlink(missing_ok=True)
+    except Exception:
+        log.exception("Vigilancia: no pude guardar la foto")
+
+
+def fotos_intrusos(horas: float = 24) -> list[tuple[datetime.datetime, Path]]:
+    desde = (datetime.datetime.now() - datetime.timedelta(hours=horas)).strftime("%Y%m%d-%H%M%S")
+    out = []
+    for f in sorted(FOTOS_DIR.glob("*.jpg")) if FOTOS_DIR.is_dir() else []:
+        if f.stem >= desde:
+            try:
+                out.append((datetime.datetime.strptime(f.stem, "%Y%m%d-%H%M%S"), f))
+            except ValueError:
+                pass
+    return out
+
+
+def mandar_fotos_intrusos() -> str:
+    """Reenvía al celular las fotos de los intrusos de las últimas 24 h."""
+    from . import telegram
+    fotos = fotos_intrusos()
+    if not fotos:
+        return _sir("No entró nadie desconocido en las últimas 24 horas")
+    if not telegram.configurado():
+        return _sir("Tengo las fotos, pero Telegram no está configurado")
+    enviadas = sum(telegram.enviar_foto(f.read_bytes(), f"Vigilancia: {t:%d/%m a las %H:%M}") for t, f in fotos)
+    if not enviadas:
+        return _sir("No pude mandarle las fotos (¿sin internet?)")
+    return _sir(f"Le mandé {'la foto' if enviadas == 1 else f'las {enviadas} fotos'} al celular")
+
+
 _FOTO = (r"\b(?:foto|fotito|fotografia|imagen|captura)\b"
          r"|\b(?:ver|ensename|muestrame|como esta|como se ve|que se ve en|que hay en) (?:el|mi) cuarto\b|^que se ve$")
 
 
 def pide_foto(n: str) -> bool:
     """"foto", "mandame una foto del cuarto", "quiero ver el cuarto". n: normalizado."""
-    return bool(re.search(_FOTO, n)) and not re.search(r"\b(?:whatsapp|perfil|youtube|google)\b", n)
+    return (bool(re.search(_FOTO, n)) and not re.search(r"\b(?:whatsapp|perfil|youtube|google)\b", n)
+            and not re.search(_FOTOS_INTRUSOS, n))  # las de los intrusos van por handle()
 
 
 def foto_del_cuarto() -> tuple[bytes | None, str]:
@@ -238,8 +290,15 @@ _VISITAS = (r"\b(?:quien|quienes|alguien|alguno|nadie)\b.*\b(?:vino|vinieron|ent
             r"estuvo|estuvieron|ha venido|han venido|ha entrado|han entrado)\b|\bvisitas?\b")
 
 
+_FOTOS_INTRUSOS = (r"\b(?:ensename|muestrame|mandame|enseñame|quiero ver|ver|dame)\b.*\b(?:quien|quienes) (?:entro|entraron|vino|vinieron)\b"
+                   r"|\bfotos? de (?:la vigilancia|los intrusos|quien entro|el intruso)\b")
+
+
 def handle(n: str, respond) -> bool:
     """n: minúsculas sin tildes."""
+    if re.search(_FOTOS_INTRUSOS, n):  # antes que pide_foto: "foto de quién entró" no es una foto nueva del cuarto
+        respond(mandar_fotos_intrusos())
+        return True
     if pide_foto(n):  # por voz: "Jarvis, mandame una foto del cuarto" -> al celular
         respond(_sir("Tomando la foto"))
         ok, error = mandar_foto()

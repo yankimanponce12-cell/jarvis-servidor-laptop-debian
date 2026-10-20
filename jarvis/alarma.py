@@ -22,10 +22,16 @@ from pathlib import Path
 
 from . import audio_focus, avisos, music, pantalla_tele, weather
 
+class _SinToken(logging.Formatter):
+    """Los errores de requests traen la URL del bot de Telegram con el token: que nunca quede en el log."""
+    def format(self, record):
+        return re.sub(r"/bot\d+:[\w-]+", "/bot<TOKEN>", super().format(record))
+
+
 logger = logging.getLogger("jarvis.alarma")
 if not logger.handlers:  # al mismo jarvis.log que la voz (sin esto no quedaba rastro de la alarma)
     _h = logging.FileHandler(Path(__file__).resolve().parent.parent / "logs" / "jarvis.log", encoding="utf-8")
-    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    _h.setFormatter(_SinToken("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(_h)
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -58,7 +64,9 @@ _DETENER = (r"\bpara (?:la|esa|esta) alarma\b|\b(?:apaga|apague|apagala|deten|de
             r"cancela|cancelala|desactiva)\b")
 _DESPIERTO = r"\bya (?:me )?(?:desperte|levante)\b|\bya (?:estoy|ando) (?:despierto|despierta|levantado|levantada)\b"
 _DETENER_SOLO = (r"(?:apagala|apagalo|apaga|apague|deten|detenla|parala|quitala|silenciala|"
-                 r"apaga eso|quita eso|ya|ya basta|basta)")
+                 r"apaga eso|quita eso|ya|ya basta|basta|"
+                 # 2026-10-19 sonando, "Alarma" por Telegram preguntó "¿a qué hora?": sola, la apaga
+                 r"(?:ya )?(?:la )?alarma(?: ya)?)")
 _esperando_hora = 0.0  # cuando pregunto "¿a que hora?" (la respuesta no trae "alarma")
 _sono_a = 0.0  # cuando sono la ultima vez
 # Mientras suena: la camara se prende sola (aunque estuviera apagada) y la
@@ -400,7 +408,11 @@ class Despertador:
             cam.start()
         ok, msg = pantalla_tele.spotify_on_tv()  # prende la tele, HDMI de la laptop, audio por HDMI
         if ok:
-            ok_vol, msg_vol = pantalla_tele.tele_js("volumen", str(VOLUMEN_TELE))
+            for _ in range(4):  # recién prendida, la tele tarda en contestar por UPnP (2026-10-20 falló sin mensaje)
+                ok_vol, msg_vol = pantalla_tele.tele_js("volumen", str(VOLUMEN_TELE))
+                if ok_vol:
+                    break
+                time.sleep(2)
             if not ok_vol:
                 logger.warning(f"Alarma: no pude poner el volumen de la tele: {msg_vol}")
         else:

@@ -231,7 +231,9 @@ _OFRECE = re.compile(
     r"^¿.*\bayudar(?:le|lo)?\b|"
     r"\bayuda necesita\b|"
     r"no dude en|algo m[aá]s|en qu[eé] (?:puedo|le)|le gustar[ií]a|qu[eé] (?:quiere|desea|le gustar[ií]a) (?:que|hacer)|"
-    r"\bquiere que\b|tiene alguna (?:pregunta|duda)|hay algo", re.IGNORECASE)
+    r"\bquiere que\b|tiene alguna (?:pregunta|duda)|hay algo|"
+    # 2026-10-18/20: 'Si necesita más información, diga "más información"' y parecidas, de muletilla
+    r"\bsi (?:necesita|quiere|desea)\b[^.!?]*\b(?:diga|d[ií]game|decir(?:me)?|me dice|av[ií]seme)\b", re.IGNORECASE)
 # el modelo a veces recita el prompt ("¿quien eres?")
 _RECITA = re.compile(r"herramienta|hablas de usted|le dices 'se|1-2 oraciones|sin markdown|"
                      r":\s*formal, ingenioso", re.IGNORECASE)

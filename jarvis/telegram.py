@@ -55,6 +55,7 @@ AYUDA = [
     "activa la vigilancia\n"
     "desactiva la vigilancia\n"
     "quién vino mientras no estaba\n"
+    "enséñame quién entró (las fotos)\n"
     "prende la cámara\n"
     "apaga la cámara\n"
     "muestra la cámara\n"

@@ -8,8 +8,10 @@ También: si la PS5 y la tele están prendidas (para "estado" y para los
 comentarios de personalidad.py), y "¿está todo bien en casa?"."""
 
 import logging
+import os
 import socket
 import threading
+import time
 
 from . import telegram
 
@@ -19,6 +21,9 @@ PS5 = ("192.168.1.80", 9302)
 TELE = ("192.168.1.77", 9197)  # puerto DLNA: abierto solo con la tele prendida (ver tele.mjs)
 BATERIA_AVISOS = (15, 7)  # % al que se avisa (una vez cada uno por descarga)
 BATERIA_CADA_S = 120
+MEMORIA_CADA_S = 60
+MEMORIA_POCA_MB = 700  # libre (MemAvailable) por debajo de esto: aviso al celular
+MEMORIA_LOG_S = 3600  # cada hora anota en jarvis.log cuánto ocupa cada parte
 
 
 def avisar(texto: str, foto: bytes | None = None) -> bool:
@@ -131,3 +136,93 @@ class MonitorBateria:
                     avisar("🔋 " + texto)
                     self._respond(texto)
                     break
+
+
+# -------------------------------------------------------------- memoria --
+def _meminfo() -> dict[str, int]:
+    """/proc/meminfo en MB."""
+    datos = {}
+    with open("/proc/meminfo") as f:
+        for linea in f:
+            clave, valor = linea.split(":", 1)
+            datos[clave] = int(valor.split()[0]) // 1024
+    return datos
+
+
+def _rss_mb(pid: int) -> int:
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            return next(int(l.split()[1]) // 1024 for l in f if l.startswith("VmRSS:"))
+    except Exception:
+        return 0
+
+
+def _procesos() -> list[tuple[int, str]]:
+    """(pid, nombre) de todos los procesos del usuario."""
+    procs = []
+    for pid in os.listdir("/proc"):
+        if pid.isdigit():
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    procs.append((int(pid), f.read().strip()))
+            except Exception:
+                pass
+    return procs
+
+
+class MonitorMemoria:
+    """El 2026-10-20 a las 07:00 la RAM se acabó al abrir Spotify para la alarma y el
+    OOM killer mató a Jarvis (3 h sin contestar). Esto: 1) le dice al kernel que,
+    si falta memoria, mate antes a Spotify (oom_score_adj 1000; subirlo no pide
+    permisos), 2) avisa al celular si queda poca y 3) cada hora anota cuánto ocupa
+    cada parte, para ver si algo crece."""
+
+    def __init__(self):
+        self._avisado = False
+        self._ultimo_log = 0.0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="memoria")
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        while not self._stop.wait(MEMORIA_CADA_S):
+            try:
+                self._revisar()
+            except Exception:
+                log.exception("Memoria: no pude revisarla")
+
+    def _revisar(self):
+        procs = _procesos()
+        for pid, nombre in procs:
+            if nombre.startswith("spotify"):
+                try:
+                    with open(f"/proc/{pid}/oom_score_adj", "r+") as f:
+                        if f.read().strip() != "1000":
+                            f.seek(0)
+                            f.write("1000")
+                except Exception:
+                    pass
+        mem = _meminfo()
+        libre = mem.get("MemAvailable", 0)
+        if libre < MEMORIA_POCA_MB and not self._avisado:
+            self._avisado = True
+            log.warning(f"Memoria: quedan {libre} MB libres")
+            avisar(f"⚠ A la laptop le quedan solo {libre} MB de memoria, señor. "
+                   "Si se acaba, el sistema puede cerrarme.")
+        elif libre > 2 * MEMORIA_POCA_MB:
+            self._avisado = False
+        if time.time() - self._ultimo_log >= MEMORIA_LOG_S:
+            self._ultimo_log = time.time()
+            partes = {"jarvis": _rss_mb(os.getpid())}
+            for pid, nombre in procs:
+                if nombre in ("llama-server", "whisper-server", "node") or nombre.startswith("spotify"):
+                    clave = "spotify" if nombre.startswith("spotify") else nombre
+                    partes[clave] = partes.get(clave, 0) + _rss_mb(pid)
+            swap = mem.get("SwapTotal", 0) - mem.get("SwapFree", 0)
+            log.info("Memoria: libre %d MB, swap %d MB | %s", libre, swap,
+                     ", ".join(f"{k} {v} MB" for k, v in partes.items()))

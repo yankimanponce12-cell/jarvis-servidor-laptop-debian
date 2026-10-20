@@ -22,4 +22,22 @@ if ls "${HF_HOME:-$HOME/.cache/huggingface}"/hub/models--Systran--faster-whisper
 fi
 
 mkdir -p logs
-exec "$PY" -u -m jarvis.main "$@"
+# Si muere de golpe (137 = SIGKILL del OOM killer, como el 2026-10-20 a las 07:00, o 1 = se
+# cayó con error) se vuelve a abrir solo; cerrarlo normal (0, Ctrl+C) no. Máximo 3 veces en 10 min.
+reinicios=()
+while true; do
+  "$PY" -u -m jarvis.main "$@"
+  codigo=$?
+  [ "$codigo" -ne 137 ] && [ "$codigo" -ne 1 ] && exit "$codigo"
+  ahora=$(date +%s)
+  recientes=()
+  for t in "${reinicios[@]}"; do (( ahora - t < 600 )) && recientes+=("$t"); done
+  reinicios=("${recientes[@]}" "$ahora")
+  if (( ${#reinicios[@]} > 3 )); then
+    echo "Jarvis se cayó 4 veces en 10 minutos; no lo reabro." >&2
+    exit "$codigo"
+  fi
+  echo "$(date '+%F %T,000') WARNING Lanzador: Jarvis terminó con código $codigo; lo reabro en 5 s" >> logs/jarvis.log
+  echo "Jarvis terminó con código $codigo; lo reabro en 5 s..." >&2
+  sleep 5
+done

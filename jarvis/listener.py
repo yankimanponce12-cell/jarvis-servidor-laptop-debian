@@ -391,6 +391,20 @@ SAVE_AUDIO_KEEP = 30
 _perdidas = [0, 0]  # [tramas perdidas por el micro (overflow) en total, las ya anotadas en el log]
 
 
+# Plática de fondo: el 18-20 de octubre se colaron pláticas del usuario con otra persona (o el
+# celular) donde Whisper oyó "Jarvis" a media frase, y la IA contestó cualquier cosa. En
+# escucha.log, lo que sí era para Jarvis y duraba >= 7 s llegó a -19..-23 dB; esas pláticas, a
+# -28..-34 dB (lejos del micro). Las órdenes cortas sí llegan bajitas a veces: solo cuentan las largas.
+FONDO_MIN_S = 7.0
+FONDO_MAX_DB = -27.5
+
+
+def _platica_de_fondo(audio: np.ndarray) -> bool:
+    if audio.size < FONDO_MIN_S * SAMPLE_RATE:
+        return False
+    return mic_config.rms_to_db(float(np.sqrt(np.mean(audio**2)))) < FONDO_MAX_DB
+
+
 def _log_utterance(audio: np.ndarray, vosk: bool, whisper: str, final: str, note: str = ""):
     """Una linea por frase en logs/escucha.log: duracion, nivel, si Vosk oyo
     "jarvis", que escribio Whisper y que se le paso a Jarvis."""
@@ -637,6 +651,11 @@ class VoiceListener:
                     audio = audio[:0]
                 if audio.size and en_vivo.voz_remota_desde(began):
                     audio = audio[:0]  # la voz del celular por las bocinas (en_vivo.py), no una orden
+                if audio.size and (follow_up or for_jarvis) and _platica_de_fondo(audio):
+                    _log_utterance(audio, for_jarvis, "", "", "(plática de fondo: larga y bajita, ignorada)")
+                    if yield_empty:
+                        yield ""
+                    continue
                 text = raw = ""
                 if follow_up and not self._speaking():
                     raw = self._safe_transcribe(audio, language)

@@ -302,6 +302,7 @@ class Session:
         personalidad.Comentarista(self.respond, self._flush, lambda: self._ultima_actividad,
                                   ocupado=lambda: self._busy).start()
         avisos.MonitorBateria(self.respond).start()
+        avisos.MonitorMemoria().start()
         mensajes.Mensajero(self._remoto).start()  # mensajes por iniciativa propia al Telegram del dueño
         self.telegram = telegram.Bot(self._remoto, self._remoto_especial, transcribir=self._transcribir_audio,
                                      sintetizar=voice_output.synthesize_wav_bytes, hud=hud)

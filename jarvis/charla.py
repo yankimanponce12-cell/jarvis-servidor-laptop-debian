@@ -90,6 +90,12 @@ _SIN_SUENO = r"(?:no (?:puedo|me puedo) dormir|no me da sueno|no tengo sueno|ten
 _FASTIDIO = r"(?:ash|ashh+|ush|agh|aj+|chale|uff+|pff+|meh|ay no|que aburrido|aburrido|no me gusto|que malo|malisimo|estuvo malo)"
 _GRACIAS = r"(?:(?:muchas |mil )?gracias(?: (?:por todo|jarvis|amigo))?|te lo agradezco|se lo agradezco)"
 _ADIOS = r"(?:adios|bye|hasta luego|nos vemos|hasta manana|me voy|ya me voy|cuidate|chao|chau|bai)"
+# 2026-10-20 "T amo" fue a la IA: "¡Es un amor inigualable, señor! Si necesita más ayuda, diga..."
+_CARINO = (r"(?:yo )?(?:te|t|tq|tk) (?:amo|quiero|adoro)(?: (?:mucho|muchisimo|un chingo|tanto))?(?: (?:amigo|carnal|bro))?"
+           r"|tqm|tkm|te quiero mucho|eres (?:mi|el) (?:amor|favorito|mejor amigo)")
+_ELOGIO = (r"(?:eres|estas|andas) (?:el mejor|lo maximo|un crack|una maquina|genial|bien listo|muy listo|increible|la onda)"
+           r"|(?:te la (?:rifaste|sacaste|lucistes?)|bien hecho|buen trabajo|excelente trabajo|que (?:listo|inteligente|crack)"
+           r"|(?:muy )?buena esa|eso es|asi se hace)(?: (?:amigo|carnal|bro|eh))?")
 
 
 _MI_VIDA = re.compile(
@@ -229,6 +235,16 @@ def rapida(texto: str, trato: str = "señor", recientes: list[str] | None = None
     if re.fullmatch(_GRACIAS, t):
         return _elegir([f"Con mucho gusto, {trato}.", f"Para eso estoy, {trato}.", f"No hay de qué, {trato}.",
                         f"Un placer, {trato}."], recientes)
+    if re.fullmatch(_CARINO, t):
+        return _elegir([f"Yo también le tengo un aprecio enorme, {trato}. Dentro de lo que un montón de circuitos puede sentir.",
+                        f"El sentimiento es mutuo, {trato}.",
+                        f"Me halaga, {trato}. Usted también es mi persona favorita.",
+                        f"Y yo a usted, {trato}. Aunque no se lo diga tan seguido."], recientes)
+    if re.fullmatch(_ELOGIO, t):
+        return _elegir([f"Gracias, {trato}. Hago lo que puedo con lo que tengo.",
+                        f"Me halaga, {trato}. Aunque el mérito es de quien me programó.",
+                        f"Para servirle, {trato}. Siempre es un gusto.",
+                        f"Se agradece, {trato}. Uno se esfuerza."], recientes)
     if re.fullmatch(_ADIOS, t):
         return _elegir([f"Hasta luego, {trato}. Fue un gusto.", f"Que esté muy bien, {trato}.",
                         f"Cuídese mucho, {trato}."], recientes)
