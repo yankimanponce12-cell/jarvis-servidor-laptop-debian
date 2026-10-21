@@ -57,6 +57,9 @@ AYUDA = [
     "foto\n"
     "activa la vigilancia\n"
     "desactiva la vigilancia\n"
+    "activa el modo salí de casa\n"
+    "desactiva el modo salí de casa\n"
+    "estoy en casa\n"
     "quién vino mientras no estaba\n"
     "enséñame quién entró (las fotos)\n"
     "prende la cámara\n"
@@ -248,20 +251,21 @@ def _es_dueno(chat_id: int | None) -> bool:
     return not chat_id or chat_id == _config().get("chat_id")
 
 
-def _para_app(texto: str, foto: bytes | None, chat_id: int | None, botones: list | None) -> bool:
+def _para_app(texto: str, foto: bytes | None, chat_id: int | None, botones: list | None,
+              video: str | None = None) -> bool:
     """True si lo tomó la app: durante una orden suya (capturar), lo que iba al
     Telegram del dueño va en la respuesta de la app y no se manda por Telegram."""
     global _ultimo_aviso
     if not _es_dueno(chat_id):
         return False
     captura = getattr(_hilo, "captura", None)
-    if captura is not None and not botones:
+    if captura is not None and not botones and not video:
         captura.append({"texto": texto, "foto": foto})
         return True
     if not getattr(_hilo, "respondiendo", False):
         with _avisos_lock:
             _ultimo_aviso += 1
-            _avisos.append({"id": _ultimo_aviso, "hora": time.time(), "texto": texto, "foto": foto})
+            _avisos.append({"id": _ultimo_aviso, "hora": time.time(), "texto": texto, "foto": foto, "video": video})
     return False
 
 
@@ -279,6 +283,11 @@ def capturar():
 def registrar_aviso(texto: str, foto: bytes | None = None):
     """Para lo que llega al Telegram del dueño sin pasar por enviar() (el WhatsApp de wa.py)."""
     _para_app(texto, foto, None, None)
+
+
+def video_de_aviso(aviso_id: int) -> str | None:
+    with _avisos_lock:
+        return next((a.get("video") for a in _avisos if a["id"] == aviso_id), None)
 
 
 def avisos_desde(ultimo: int) -> list[dict]:
@@ -413,6 +422,23 @@ class _Accion:
 
     def __exit__(self, *exc):
         self._fin.set()
+
+
+def enviar_video(mp4: Path, texto: str = "", chat_id: int | None = None) -> bool:
+    """Un video (el clip de la vigilancia). También queda como aviso para la app."""
+    texto = sin_emojis(texto)
+    _para_app(texto, None, chat_id, None, video=str(mp4))
+    if not configurado():
+        return False
+    try:
+        with open(mp4, "rb") as f:
+            _api("sendVideo", timeout=180, data={"chat_id": chat_id or _config()["chat_id"], "caption": texto[:1000],
+                                                 "supports_streaming": "true"},
+                 files={"video": (mp4.name, f, "video/mp4")})
+        return True
+    except Exception as exc:
+        log.warning(f"Telegram: no pude mandar el video ({exc})")
+        return False
 
 
 def enviar_voz(ogg: bytes, texto: str = "", chat_id: int | None = None) -> bool:

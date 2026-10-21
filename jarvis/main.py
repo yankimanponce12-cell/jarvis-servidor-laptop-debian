@@ -15,6 +15,7 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import logging
 
 from jarvis import agent, audio_focus, brain, camara, demo, interrupt, llm, memory, stt_gpu, system, voice_config, voice_output, whatsapp
+from jarvis import casa
 from jarvis import server as jarvis_server
 from jarvis.commands import _is_affirmative, handle_command
 from jarvis.hud import Hud
@@ -302,6 +303,7 @@ class Session:
         personalidad.Comentarista(self.respond, self._flush, lambda: self._ultima_actividad,
                                   ocupado=lambda: self._busy).start()
         avisos.MonitorBateria(self.respond).start()
+        casa.Vigilante().start()  # modo salí de casa: la vigilancia se activa sola al irse el celular
         avisos.MonitorMemoria().start()
         mensajes.Mensajero(self._remoto).start()  # mensajes por iniciativa propia al Telegram del dueño
         self.telegram = telegram.Bot(self._remoto, self._remoto_especial, transcribir=self._transcribir_audio,

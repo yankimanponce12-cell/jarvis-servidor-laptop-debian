@@ -4,7 +4,7 @@ import re
 import threading
 from pathlib import Path
 
-from . import (actions, agent, alarma, brain, camara, charla, cochera, chistes, curiosidades, demo, en_vivo, entrada, interrupt, memory, mensajes, music, noticias, personalidad,
+from . import (actions, agent, alarma, brain, camara, casa, charla, cochera, chistes, curiosidades, demo, en_vivo, entrada, interrupt, memory, mensajes, music, noticias, personalidad,
                recordatorios, system, tv, vigilancia, weather, whatsapp)
 
 EXIT_WORDS = [
@@ -348,6 +348,10 @@ def _handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
 
     # "camara en vivo": antes que vigilancia y camara (que se quedarian con "camara")
     if en_vivo.handle(t, respond):
+        return True
+
+    # "modo salí de casa", "¿estoy en casa?": antes que vigilancia ("vigilancia automática")
+    if casa.handle(t, respond):
         return True
 
     if vigilancia.handle(t, respond):

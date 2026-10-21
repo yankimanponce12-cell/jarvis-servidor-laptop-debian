@@ -64,6 +64,7 @@ alarma.json
 telegram_config.json
 recordatorios.json
 vigilancia.json
+casa.json
 visitas.json
 personalidad.json
 mensajes.json

@@ -39,6 +39,13 @@ DUENO = "dueno"  # la clave con que camara.py guarda la cara del dueño
 FOTOS_DIR = DATOS / "logs" / "vigilancia"
 MAX_FOTOS = 20
 DIAS_FOTOS = 7
+# Clip de video al entrar alguien (mp4v: el OpenCV de pip no trae H.264; Android
+# y Telegram en Android lo reproducen). Mientras graba, la camara lee a 15
+# cuadros/s como con alguien mirando en vivo.
+CLIP_S = 10
+CLIP_FPS = 10
+CLIP_TAM = (960, 540)
+MAX_CLIPS = 10
 _lock = threading.Lock()
 
 
@@ -153,12 +160,21 @@ def activar(respond):
         respond(_sir("Vigilancia activada. Si entra alguien que no sea usted, le mando una foto al celular" + extra))
 
 
+def marcar_por_salida(valor: bool):
+    """La activó el modo salí de casa (casa.py): solo esa se apaga sola al volver."""
+    _set_config(por_salida=valor)
+
+
+def por_salida() -> bool:
+    return bool(_config().get("por_salida"))
+
+
 def desactivar(respond=None, motivo: str = "") -> bool:
     cfg = _config()
     if not cfg.get("activa"):
         return False
     desde = datetime.datetime.fromisoformat(cfg["desde"]) if cfg.get("desde") else None
-    _set_config(activa=False, cam_por_vigilancia=False)
+    _set_config(activa=False, cam_por_vigilancia=False, por_salida=False)
     cam = _camara()
     from . import camara as camara_mod
     if cfg.get("cam_por_vigilancia") and cam is not None and not camara_mod.habilitada():
@@ -200,8 +216,58 @@ def en_llegada(nombre: str | None, respond) -> bool:
             avisos.avisar("📷 Unos segundos después:", f2)
 
     threading.Thread(target=segunda, daemon=True).start()
+    threading.Thread(target=_mandar_clip, args=(cam, hora), daemon=True, name="clip").start()
     respond("Atención. No lo reconozco. El señor ya fue notificado.")
     return True
+
+
+# ------------------------------------------------------------------- clip --
+def grabar_clip(cam, segundos: float = CLIP_S) -> Path | None:
+    """Graba `segundos` de la camara en un mp4 (logs/vigilancia/). None si no se pudo."""
+    import cv2
+    try:
+        FOTOS_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    ruta = FOTOS_DIR / f"{datetime.datetime.now():%Y%m%d-%H%M%S}.mp4"
+    w = cv2.VideoWriter(str(ruta), cv2.VideoWriter_fourcc(*"mp4v"), CLIP_FPS, CLIP_TAM)
+    if not w.isOpened():
+        log.warning("Vigilancia: no pude abrir el video del clip")
+        return None
+    cam.espectadores += 1
+    escritos = 0
+    try:
+        fin = time.time() + segundos
+        while time.time() < fin and cam.activa:
+            t0 = time.time()
+            cuadro = cam.ultimo_cuadro()
+            if cuadro is not None:
+                w.write(cv2.resize(cuadro, CLIP_TAM, interpolation=cv2.INTER_AREA))
+                escritos += 1
+            time.sleep(max(0.0, 1 / CLIP_FPS - (time.time() - t0)))
+    finally:
+        cam.espectadores = max(0, cam.espectadores - 1)
+        w.release()
+    clips = sorted(FOTOS_DIR.glob("*.mp4"))
+    for viejo in clips[:-MAX_CLIPS]:
+        viejo.unlink(missing_ok=True)
+    if escritos < CLIP_FPS:  # menos de un segundo de video: no sirve
+        ruta.unlink(missing_ok=True)
+        return None
+    return ruta
+
+
+def _mandar_clip(cam, hora: str):
+    from . import telegram
+    if cam is None:
+        return
+    try:
+        ruta = grabar_clip(cam)
+    except Exception:
+        log.exception("Vigilancia: no pude grabar el clip")
+        return
+    if ruta:
+        telegram.enviar_video(ruta, f"Vigilancia: los {CLIP_S} segundos desde que entró ({hora}).")
 
 
 # ------------------------------------------------------------------- foto --

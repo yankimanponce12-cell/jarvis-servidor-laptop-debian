@@ -7,7 +7,7 @@ import socket
 import time
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 
 from jarvis import agent, brain, en_vivo, telegram, voice_config, voice_output
 from jarvis.commands import handle_command
@@ -267,9 +267,50 @@ def api_avisos():
     except ValueError:
         desde = 0
     avisos = [{"id": a["id"], "hora": a["hora"], "texto": a["texto"],
-               "foto": base64.b64encode(a["foto"]).decode("ascii") if a["foto"] else None}
+               "foto": base64.b64encode(a["foto"]).decode("ascii") if a["foto"] else None,
+               "video": f"/api/avisos/{a['id']}/video" if a.get("video") else None}
               for a in telegram.avisos_desde(desde)]
     return jsonify({"avisos": avisos, "ultimo": telegram.ultimo_aviso(), "sesion": telegram.SESION_AVISOS})
+
+
+@app.route("/api/avisos/<int:aviso_id>/video")
+def api_aviso_video(aviso_id: int):
+    """El clip de un aviso (vigilancia.grabar_clip)."""
+    if not _token_ok():
+        return jsonify({"error": "token invalido"}), 401
+    ruta = telegram.video_de_aviso(aviso_id)
+    if not ruta or not Path(ruta).exists():
+        return jsonify({"error": "ya no está"}), 404
+    return send_file(ruta, mimetype="video/mp4")
+
+
+@app.route("/api/estado")
+def api_estado():
+    """Estado de la casa para el widget de la app."""
+    if not _token_ok():
+        return jsonify({"error": "token invalido"}), 401
+    from jarvis import avisos, camara, casa, vigilancia
+    cam = camara.instancia
+    return jsonify({
+        "vigilancia": vigilancia.activa(),
+        "auto_casa": casa.auto(),
+        "en_casa": casa.en_casa(),
+        "camara": bool(cam and cam.activa),
+        "presente": bool(cam and cam.activa and cam.presente),
+        "texto": telegram.sin_emojis(avisos.estado_casa()),
+    })
+
+
+@app.route("/api/casa", methods=["POST"])
+def api_casa():
+    """Prende o apaga el modo salí de casa (ajustes de la app)."""
+    if not _token_ok():
+        return jsonify({"error": "token invalido"}), 401
+    from jarvis import casa
+    data = request.get_json(silent=True) or {}
+    if "auto" in data:
+        casa.poner_auto(bool(data["auto"]))
+    return jsonify({"auto_casa": casa.auto(), "en_casa": casa.en_casa()})
 
 
 @app.route("/api/ayuda")

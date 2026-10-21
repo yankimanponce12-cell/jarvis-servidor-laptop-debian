@@ -307,6 +307,12 @@ class Camara:
         ok, jpg = cv2.imencode(".jpg", self._cuadro, [cv2.IMWRITE_JPEG_QUALITY, 85])
         return jpg.tobytes() if ok else None
 
+    def ultimo_cuadro(self):
+        """El cuadro mas reciente (720p, BGR) o None si la camara no da imagen
+        (para grabar el clip de la vigilancia). Cada cuadro es un arreglo nuevo:
+        no hace falta copiarlo."""
+        return self._cuadro if self._cuadro is not None and time.time() - self._cuadro_t < 2 else None
+
     def olvidar_caras(self):
         self._caras = {}
         CARAS_FILE.unlink(missing_ok=True)

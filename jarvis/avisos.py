@@ -76,6 +76,8 @@ def estado_casa() -> str:
     else:
         partes.append("📷 Cámara apagada.")
     partes.append("🛡 Vigilancia " + ("ACTIVA." if vigilancia.activa() else "desactivada."))
+    from . import casa
+    partes.append(casa.estado_texto())
     extranos = vigilancia.visitas_extranas(horas=24)
     if extranos:
         partes.append(f"⚠ {len(extranos)} llegada(s) sin reconocer en 24 h; la última a las {extranos[-1]:%H:%M}.")
