@@ -378,8 +378,10 @@ def _chat(messages, emit: _Emitter, tools=None):
     if msg.get("tool_calls") or emit.said:
         return msg
     # no quedo nada (se fue al chino, o solo repitio al usuario): otro intento,
-    # sin herramientas y pidiendo que no repita
-    retry = llm.chat(_reintento(full, emit), max_tokens=90, slot=llm.SLOT_AGENT, temperature=0.8)
+    # sin herramientas y pidiendo que no repita. En el slot de la charla: sin
+    # herramientas el prompt es otro, y en el del agente borraba su cache (~900
+    # tokens) y el siguiente pedido tardaba ~20 s más releyéndolo (2026-10-21)
+    retry = llm.chat(_reintento(full, emit), max_tokens=90, slot=llm.SLOT_CHAT, temperature=0.8)
     emit.feed(retry.get("content") or "")
     return {"content": emit.text}
 
@@ -594,7 +596,7 @@ def answer_from_memory(pregunta: str, resultados: list[str]) -> str:
     )
     try:
         msg = llm.chat([{"role": "system", "content": _system(BASE_SYSTEM_PROMPT)}, {"role": "user", "content": prompt}],
-                       max_tokens=90, slot=llm.SLOT_AGENT)
+                       max_tokens=90, slot=llm.SLOT_CHAT)  # no en el del agente: le borraba la cache (ver _chat)
         return llm.limit_sentences(msg.get("content") or "") or "No encontré nada relacionado, señor."
     except Exception:
         return "No pude buscar en mi memoria ahorita, señor."
