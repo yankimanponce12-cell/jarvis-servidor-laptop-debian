@@ -511,6 +511,8 @@ _caidos: set[str] = set()
 
 def _revisar_salud():
     from . import camara as cam_mod, llm, stt_gpu
+    if llm._cerrando:  # Jarvis se está cerrando: los servidores se apagan a propósito (2026-10-21: 3 avisos falsos)
+        return
     checks = {
         "la IA (llama-server)": lambda: _http_ok(f"{llm.BASE_URL}/health"),
         "Whisper (el oído)": lambda: _http_ok(f"http://127.0.0.1:{stt_gpu.PORT}/"),
