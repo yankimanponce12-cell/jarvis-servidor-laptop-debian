@@ -35,7 +35,7 @@ _DEMO = r"(?:demo|demos|demostracion|demostraciones|presentacion)"
 _PEDIDO = re.compile(
     rf"^(?:jarvis )?(?:(?:entra|entrar|activa|activar|pon|ponte|inicia|iniciar|arranca|corre|ejecuta|ejecutar|empieza|"
     rf"comienza|lanza|haz|hazme|hagamos|haznos|dame|danos|muestra|muestrame|quiero(?: ver)?|vamos con|dale|va|echa) )?"
-    rf"(?:(?:el|la|una|un|tu|en) )?(?:modo ?{_DEMO}|modo de mo|modo demon|mododemo|{_DEMO})"
+    rf"(?:(?:el|la|una|un|tu|en) )?(?:modo ?{_DEMO}|modo de mo|modo demon|mododemo|modo (?:de )?pruebas?|{_DEMO})"
     rf"(?: (?:de jarvis|completa|completo|para (?:el|la|mi) (?:profe|profesor|profesora|maestro|maestra|escuela|clase)|"
     rf"para (?:\w+ ){{0,2}}\w+|por favor|porfa|jarvis|ahora|ya))*$"
     rf"|^(?:jarvis )?(?:presentate|preséntate|demuestra|demuestrale|muestrale|ensenale)(?: (?:con|ante|a|al)(?: (?:el|la|mi|mis))? "
