@@ -281,13 +281,17 @@ def responder_boton(callback_id: str, texto: str = ""):
         pass
 
 
-def enviar_foto(jpg: bytes, texto: str = "", chat_id: int | None = None, html: bool = False) -> bool:
+def enviar_foto(jpg: bytes, texto: str = "", chat_id: int | None = None, html: bool = False,
+                botones: list | None = None) -> bool:
     if not configurado():
         return False
     texto = _trato(chat_id, texto)
     datos = {"chat_id": chat_id or _config()["chat_id"], "caption": texto[:1000]}
     if html:
         datos["parse_mode"] = "HTML"
+    if botones:
+        datos["reply_markup"] = json.dumps({"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in fila]
+                                                                for fila in botones]})
     try:
         _api("sendPhoto", timeout=60, data=datos, files={"photo": ("camara.jpg", jpg, "image/jpeg")})
         _a_invitado(chat_id, f"[foto del cuarto] {texto}")
@@ -524,11 +528,7 @@ class Bot:
     def _boton_demo(self, dato: str, callback_id: str):
         """Botón del final del modo demo: se hace como si el dueño lo hubiera escrito."""
         from . import modo_demo
-        responder_boton(callback_id)
-        if dato == "demo:reloj":
-            enviar(modo_demo.saludo_reloj())
-        elif dato in modo_demo.BOTONES:
-            self._atender(modo_demo.BOTONES[dato])
+        modo_demo.boton(self, dato, callback_id)
 
     def _contestar(self, texto: str, por_voz: bool, entendi: str = "", chat_id: int | None = None):
         texto = _trato(chat_id, texto)  # tambien lo que se dice en la nota de voz
@@ -542,18 +542,19 @@ class Bot:
                 log.exception("Telegram: no pude armar la nota de voz")
         enviar((f"🎙 «{entendi}»\n" if entendi else "") + texto, chat_id=chat_id)  # sin voz: al menos el texto
 
-    def _atender(self, texto: str, por_voz: bool = False, msg: dict | None = None):
+    def _atender(self, texto: str, por_voz: bool = False, msg: dict | None = None, pie: bool = True):
+        """pie=False: la nota de voz va sin «lo que entendí» (botones del modo demo)."""
         t0 = time.time()
         accion = _Accion("record_voice" if por_voz else "typing")
         with accion:
-            self._atender_(texto, por_voz, accion, msg)
+            self._atender_(texto, por_voz, accion, msg, pie)
         log.info(f"Telegram: contesté «{texto[:40]}» en {time.time() - t0:.1f} s")
 
-    def _atender_(self, texto: str, por_voz: bool, accion: _Accion, msg: dict | None = None):
+    def _atender_(self, texto: str, por_voz: bool, accion: _Accion, msg: dict | None = None, pie: bool = True):
         log.info(f"Telegram{' (audio)' if por_voz else ''}: {texto!r}")
         if self._hud:
             self._hud.log(f"📱 Telegram{' 🎙' if por_voz else ''}: {texto}")
-        entendi = texto if por_voz else ""
+        entendi = texto if por_voz and pie else ""
         try:
             from . import modo_demo  # "modo demo": la presentación para enseñar el proyecto
             if modo_demo.corriendo() and modo_demo.es_parar(texto):
