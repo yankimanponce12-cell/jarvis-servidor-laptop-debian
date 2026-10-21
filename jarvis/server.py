@@ -1,5 +1,7 @@
+import base64
 import datetime
 import ipaddress
+import re
 import secrets
 import socket
 import time
@@ -7,7 +9,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from jarvis import agent, brain, en_vivo, voice_config, voice_output
+from jarvis import agent, brain, en_vivo, telegram, voice_config, voice_output
 from jarvis.commands import handle_command
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -41,6 +43,12 @@ def _load_or_create_token() -> str:
 
 
 TOKEN = _load_or_create_token()
+
+# main.py conecta estos dos, los mismos que usa el bot de Telegram, para que la
+# app del celular entienda exactamente lo mismo que Telegram (ver _ejecutar):
+remoto = None  # texto -> respuestas (handle_command con el candado de órdenes de main.py)
+especiales = None  # texto -> {"texto", "foto"} o None: "estado", "foto", "foto de la cochera"
+_AYUDA = {"start", "ayuda", "help", "comandos", "lista de comandos", "que puedes hacer", "que puedo hacer"}
 
 app = Flask(__name__, static_folder=str(WEB_DIR), static_url_path="/static")
 
@@ -193,14 +201,80 @@ def api_command():
     if not text:
         return jsonify({"error": "falta 'text'"}), 400
 
-    responses = []
+    # lo que en Telegram llegaría aparte (fotos de la cochera, de los intrusos)
+    # se junta y va en esta misma respuesta (telegram.capturar)
+    with telegram.capturar() as enviado:
+        responses, fotos, keep_going = _ejecutar(text)
+    for e in enviado:
+        if e["foto"]:
+            fotos.append({"jpg": base64.b64encode(e["foto"]).decode("ascii"), "texto": e["texto"]})
+        elif e["texto"]:
+            responses.append(e["texto"])
+    return jsonify({"responses": responses, "fotos": fotos, "exit": not keep_going})
+
+
+def _ejecutar(text: str) -> tuple[list[str], list[dict], bool]:
+    """Una orden de la app por el mismo camino que un mensaje de Telegram
+    (telegram.Bot._atender_): ayuda, invitados, WhatsApp, "estado"/"foto" y al
+    final commands.py. Antes iba directo a handle_command y "estatus" acababa
+    en la IA. (respuestas, fotos, seguir)."""
+    from jarvis import invitados, wa
+
+    plano = re.sub(r"[^\w ]", "", text.lower().translate(str.maketrans("áéíóú", "aeiou"))).strip()
+    if plano in _AYUDA:
+        return list(telegram.AYUDA), [], True
+    admin = invitados.comando_dueno(text)
+    if admin:
+        return [admin], [], True
+    m = wa._MANDAR.match(wa._plano(text))  # "wa mamá: ya voy" (en Telegram usa el mensaje original)
+    if m:
+        nombre = (m.group("n1") or m.group("n2")).strip()
+        mensaje = (m.group("m1") or m.group("m2")).strip()
+        if wa.send_message(nombre, mensaje):
+            return [f"Listo, señor: le mandé a {nombre} «{mensaje}»."], [], True
+        return [f"No pude mandarle el WhatsApp a {nombre}, señor."], [], True
+    resp = wa.comando(text, {})
+    if resp is not None:
+        return ([resp] if resp else []), [], True
+    if especiales is not None:
+        especial = especiales(text)
+        if especial is not None:
+            fotos = ([{"jpg": base64.b64encode(especial["foto"]).decode("ascii"), "texto": ""}]
+                     if especial.get("foto") else [])
+            return ([especial["texto"]] if especial.get("texto") else []), fotos, True
+    if remoto is not None:
+        return remoto(text), [], True
     # escuchar=None: los flujos que piden dictado por microfono (mensajes de
-    # WhatsApp, confirmar reproducir un video) ya manejan ese caso sin
-    # romperse (ver commands.py), solo avisan que no pueden tomar dictado en
-    # este modo. El microfono del telefono lo maneja el navegador (Web
-    # Speech API en app.js), no este servidor.
+    # WhatsApp, confirmar reproducir un video) avisan que no pueden tomar
+    # dictado en este modo (ver commands.py).
+    responses = []
     keep_going = handle_command(text, respond=responses.append, escuchar=None)
-    return jsonify({"responses": responses, "exit": not keep_going})
+    return responses, [], keep_going
+
+
+@app.route("/api/avisos")
+def api_avisos():
+    """Lo que Jarvis le mandó al dueño por su cuenta (telegram._para_app), para
+    que la app lo muestre y lo notifique. ?desde=<id> devuelve solo los nuevos;
+    "sesion" cambia si Jarvis se reinició (los id vuelven a empezar)."""
+    if not _token_ok():
+        return jsonify({"error": "token invalido"}), 401
+    try:
+        desde = int(request.args.get("desde", "0"))
+    except ValueError:
+        desde = 0
+    avisos = [{"id": a["id"], "hora": a["hora"], "texto": a["texto"],
+               "foto": base64.b64encode(a["foto"]).decode("ascii") if a["foto"] else None}
+              for a in telegram.avisos_desde(desde)]
+    return jsonify({"avisos": avisos, "ultimo": telegram.ultimo_aviso(), "sesion": telegram.SESION_AVISOS})
+
+
+@app.route("/api/ayuda")
+def api_ayuda():
+    """La lista de comandos de Telegram ("ayuda"), para la pantalla de comandos de la app."""
+    if not _token_ok():
+        return jsonify({"error": "token invalido"}), 401
+    return jsonify({"secciones": telegram.AYUDA})
 
 
 @app.route("/api/voice-engine", methods=["GET"])

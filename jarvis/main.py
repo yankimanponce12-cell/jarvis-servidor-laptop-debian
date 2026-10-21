@@ -307,6 +307,9 @@ class Session:
         self.telegram = telegram.Bot(self._remoto, self._remoto_especial, transcribir=self._transcribir_audio,
                                      sintetizar=voice_output.synthesize_wav_bytes, hud=hud)
         self.telegram.start()
+        # la app del celular (server.py) entiende lo mismo que Telegram
+        jarvis_server.remoto = self._remoto
+        jarvis_server.especiales = self._remoto_especial
         # WhatsApp por Telegram (wa.py): puente de Baileys en Node, en su hilo (tarda ~1 s en arrancar)
         threading.Thread(target=whatsapp.wa.iniciar, daemon=True).start()
         # el reloj ESP32: control remoto, avisos, batería y pasos (reloj.py)

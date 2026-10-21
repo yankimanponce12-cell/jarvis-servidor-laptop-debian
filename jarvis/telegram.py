@@ -19,10 +19,13 @@ Sin librerías extra: la API HTTP de Telegram con requests y long polling
 (getUpdates con timeout), así no hace falta abrir ningún puerto del router.
 Las notas de voz (OGG Opus) las lee y escribe soundfile (libsndfile)."""
 
+import collections
+import contextlib
 import io
 import json
 import logging
 import re
+import secrets
 import sys
 import threading
 import time
@@ -210,6 +213,59 @@ _sesion_espera = _nueva_sesion()
 _sesion = _nueva_sesion()
 
 
+# ------------------------------------------------------- app del celular --
+# Lo que Jarvis le manda al dueño por su cuenta (avisos, recordatorios, el
+# WhatsApp que llega, los mensajes de mensajes.py...) también queda aquí para
+# la app de Android (server.py: /api/avisos). Las respuestas a lo que el dueño
+# escribió en Telegram no: ya las vio ahí.
+_hilo = threading.local()  # .respondiendo: el Bot contesta un chat; .captura: lista de una orden de la app
+_avisos: collections.deque = collections.deque(maxlen=60)
+_avisos_lock = threading.Lock()
+_ultimo_aviso = 0
+SESION_AVISOS = secrets.token_hex(4)  # cambia en cada arranque: la app sabe que los id volvieron a empezar
+
+
+def _es_dueno(chat_id: int | None) -> bool:
+    return not chat_id or chat_id == _config().get("chat_id")
+
+
+def _para_app(texto: str, foto: bytes | None, chat_id: int | None, botones: list | None) -> bool:
+    """True si lo tomó la app: durante una orden suya (capturar), lo que iba al
+    Telegram del dueño va en la respuesta de la app y no se manda por Telegram."""
+    global _ultimo_aviso
+    if not _es_dueno(chat_id):
+        return False
+    captura = getattr(_hilo, "captura", None)
+    if captura is not None and not botones:
+        captura.append({"texto": texto, "foto": foto})
+        return True
+    if not getattr(_hilo, "respondiendo", False):
+        with _avisos_lock:
+            _ultimo_aviso += 1
+            _avisos.append({"id": _ultimo_aviso, "hora": time.time(), "texto": texto, "foto": foto})
+    return False
+
+
+@contextlib.contextmanager
+def capturar():
+    """Durante una orden de la app: las fotos y mensajes que irían al dueño por
+    Telegram desde este hilo (la cochera, los intrusos...) se juntan aquí."""
+    _hilo.captura = []
+    try:
+        yield _hilo.captura
+    finally:
+        _hilo.captura = None
+
+
+def avisos_desde(ultimo: int) -> list[dict]:
+    with _avisos_lock:
+        return [a for a in _avisos if a["id"] > ultimo]
+
+
+def ultimo_aviso() -> int:
+    return _ultimo_aviso
+
+
 def _api(metodo: str, timeout: float = 20, **kwargs):
     cfg = _config()
     sesion = _sesion_espera if metodo == "getUpdates" else _sesion
@@ -224,6 +280,8 @@ def enviar(texto: str, chat_id: int | None = None, botones: list | None = None, 
     """Manda un mensaje (al dueño si no se dice a quién). botones: filas de
     (texto, dato) que vuelven como callback_query. html: con <b>, <i>, <pre>
     (modo_demo.py). False si falló."""
+    if _para_app(texto, None, chat_id, botones):
+        return True
     if not configurado():
         return False
     texto = _trato(chat_id, texto)
@@ -283,6 +341,8 @@ def responder_boton(callback_id: str, texto: str = ""):
 
 def enviar_foto(jpg: bytes, texto: str = "", chat_id: int | None = None, html: bool = False,
                 botones: list | None = None) -> bool:
+    if _para_app(texto, jpg, chat_id, botones):
+        return True
     if not configurado():
         return False
     texto = _trato(chat_id, texto)
@@ -489,17 +549,21 @@ class Bot:
 
     def _atender_audio(self, file_id: str):
         """Nota de voz: se transcribe y se contesta con otra nota de voz."""
-        if self._transcribir is None:
-            enviar("Por ahora solo entiendo texto, señor.")
-            return
-        with _Accion("record_voice"):
-            texto = self._transcribir_nota(file_id)
-        if texto is None:
-            return
-        if not texto:
-            self._contestar("No le entendí, señor. ¿Puede repetirlo?", por_voz=True)
-            return
-        self._atender(texto, por_voz=True)
+        _hilo.respondiendo = True  # lo que se conteste no es un aviso para la app
+        try:
+            if self._transcribir is None:
+                enviar("Por ahora solo entiendo texto, señor.")
+                return
+            with _Accion("record_voice"):
+                texto = self._transcribir_nota(file_id)
+            if texto is None:
+                return
+            if not texto:
+                self._contestar("No le entendí, señor. ¿Puede repetirlo?", por_voz=True)
+                return
+            self._atender(texto, por_voz=True)
+        finally:
+            _hilo.respondiendo = False
 
     def _atender_invitado(self, chat_id: int, texto: str, file_id: str | None):
         """Un invitado (invitados.py): mismas reglas en texto o en audio, con
@@ -546,8 +610,12 @@ class Bot:
         """pie=False: la nota de voz va sin «lo que entendí» (botones del modo demo)."""
         t0 = time.time()
         accion = _Accion("record_voice" if por_voz else "typing")
-        with accion:
-            self._atender_(texto, por_voz, accion, msg, pie)
+        _hilo.respondiendo = True  # lo que se conteste no es un aviso para la app
+        try:
+            with accion:
+                self._atender_(texto, por_voz, accion, msg, pie)
+        finally:
+            _hilo.respondiendo = False
         log.info(f"Telegram: contesté «{texto[:40]}» en {time.time() - t0:.1f} s")
 
     def _atender_(self, texto: str, por_voz: bool, accion: _Accion, msg: dict | None = None, pie: bool = True):
