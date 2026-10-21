@@ -251,11 +251,12 @@ def _botones(filas) -> str:
 def _reenviar(ev: dict):
     cfg = _config()
     if ev["tipo"] == "conexion":
-        texto = {"vinculado": "✅ WhatsApp vinculado, señor. Lo que le llegue se lo paso por aquí; "
+        texto = {"vinculado": "WhatsApp vinculado, señor. Lo que le llegue se lo paso por aquí; "
                               "para contestar, deslice el mensaje y responda.",
-                 "desvinculado": "⚠️ WhatsApp se desvinculó (lo cerraron desde el teléfono)."}.get(ev["estado"])
+                 "desvinculado": "WhatsApp se desvinculó (lo cerraron desde el teléfono)."}.get(ev["estado"])
         if texto:
             _tg("sendMessage", data={"chat_id": _dueno(), "text": texto})
+            _a_la_app(texto)
         return
     if cfg.get("pausado") or ev["jid"] in cfg.get("silenciados", []):
         return
@@ -264,10 +265,14 @@ def _reenviar(ev: dict):
         return
     if ev.get("grupo") and not cfg.get("grupos"):
         return
-    quien = f"👥 {ev.get('grupo_nombre') or 'grupo'} · {ev['nombre']}" if ev.get("grupo") else f"💬 {ev['nombre']}"
+    quien = f"{ev.get('grupo_nombre') or 'Grupo'} · {ev['nombre']}" if ev.get("grupo") else ev["nombre"]
     texto = ev.get("texto") or ""
     media = ev.get("media")
     res = None
+    foto = None
+    if media and media.get("tipo") == "imagen" and media.get("archivo") and os.path.exists(media["archivo"]):
+        foto = Path(media["archivo"]).read_bytes()  # _mandar_media borra el archivo
+    _a_la_app(f"WhatsApp de {quien}: " + (texto or (f"[{media['tipo']}]" if media else "")), foto)
     if media and media.get("archivo") and os.path.exists(media["archivo"]):
         res = _mandar_media(media, f"{quien}\n{texto}".strip())
     if res is None:
@@ -275,6 +280,15 @@ def _reenviar(ev: dict):
             texto = f"[{media['tipo']}{' — ' + media['error'] if media.get('error') else ''}]"
         res = _tg("sendMessage", data={"chat_id": _dueno(), "text": f"{quien}\n{texto}"[:4000]})
     _recordar(res["message_id"], ev["jid"], ev.get("grupo_nombre") or ev["nombre"])
+
+
+def _a_la_app(texto: str, foto: bytes | None = None):
+    """Lo que llega de WhatsApp también le llega a la app del celular (telegram.registrar_aviso)."""
+    try:
+        from . import telegram
+        telegram.registrar_aviso(texto, foto)
+    except Exception:
+        log.exception("WhatsApp: no pude pasarlo a la app")
 
 
 def _mandar_media(media: dict, pie: str) -> dict | None:
@@ -302,13 +316,15 @@ def _mandar_media(media: dict, pie: str) -> dict | None:
 def _reenviar_llamada(ev: dict):
     tipo = "videollamada" if ev.get("video") else "llamada"
     if ev["estado"] == "perdida":
-        res = _tg("sendMessage", data={"chat_id": _dueno(), "text": f"📵 {tipo.capitalize()} perdida de {ev['nombre']}"})
+        res = _tg("sendMessage", data={"chat_id": _dueno(), "text": f"{tipo.capitalize()} perdida de {ev['nombre']}"})
+        _a_la_app(f"{tipo.capitalize()} perdida de WhatsApp de {ev['nombre']}")
     else:
         clave = secrets.token_hex(4)
         _llamadas[clave] = {"id": ev["llamada"], "jid": ev["jid"], "nombre": ev["nombre"], "t": time.time()}
         res = _tg("sendMessage", data={
-            "chat_id": _dueno(), "text": f"📞 {ev['nombre']} te está haciendo una {tipo} de WhatsApp",
-            "reply_markup": _botones([[("🔴 Colgar", f"wa:col:{clave}"), ("💬 Colgar y avisar", f"wa:avi:{clave}")]])})
+            "chat_id": _dueno(), "text": f"{ev['nombre']} te está haciendo una {tipo} de WhatsApp",
+            "reply_markup": _botones([[("Colgar", f"wa:col:{clave}"), ("Colgar y avisar", f"wa:avi:{clave}")]])})
+        _a_la_app(f"{ev['nombre']} te está haciendo una {tipo} de WhatsApp")
     _recordar(res["message_id"], ev["jid"], ev["nombre"])
 
 

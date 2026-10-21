@@ -175,6 +175,25 @@ AYUDA = [
 ]
 
 
+# Emojis y pictogramas (no las flechas, viñetas ni comillas): Jarvis escribe sin
+# ellos, más sobrio. Lo que escriben los contactos de WhatsApp no pasa por aquí.
+_EMOJIS = re.compile("[\U0001F000-\U0001FAFF\U0001F1E6-\U0001F1FF\u2300-\u23FF\u2600-\u27BF"
+                     "\u2B00-\u2BFF\uFE0E\uFE0F\u200D\u20E3]")
+
+
+def sin_emojis(texto: str) -> str:
+    if not texto:
+        return texto
+    limpio = _EMOJIS.sub("", texto)
+    limpio = re.sub(r"(?m)^[ \t]+|[ \t]+$", "", limpio)  # el espacio que quedaba tras el emoji al inicio
+    return re.sub(r"[ \t]{2,}", " ", limpio)
+
+
+def _botones_limpios(botones: list) -> str:
+    return json.dumps({"inline_keyboard": [[{"text": sin_emojis(t) or t, "callback_data": d} for t, d in fila]
+                                           for fila in botones]})
+
+
 def _config() -> dict:
     try:
         return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
@@ -257,6 +276,11 @@ def capturar():
         _hilo.captura = None
 
 
+def registrar_aviso(texto: str, foto: bytes | None = None):
+    """Para lo que llega al Telegram del dueño sin pasar por enviar() (el WhatsApp de wa.py)."""
+    _para_app(texto, foto, None, None)
+
+
 def avisos_desde(ultimo: int) -> list[dict]:
     with _avisos_lock:
         return [a for a in _avisos if a["id"] > ultimo]
@@ -280,6 +304,7 @@ def enviar(texto: str, chat_id: int | None = None, botones: list | None = None, 
     """Manda un mensaje (al dueño si no se dice a quién). botones: filas de
     (texto, dato) que vuelven como callback_query. html: con <b>, <i>, <pre>
     (modo_demo.py). False si falló."""
+    texto = sin_emojis(texto)
     if _para_app(texto, None, chat_id, botones):
         return True
     if not configurado():
@@ -289,8 +314,7 @@ def enviar(texto: str, chat_id: int | None = None, botones: list | None = None, 
     if html:
         datos["parse_mode"] = "HTML"
     if botones:
-        datos["reply_markup"] = json.dumps({"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in fila]
-                                                                for fila in botones]})
+        datos["reply_markup"] = _botones_limpios(botones)
     try:
         _api("sendMessage", data=datos)
         _a_invitado(chat_id, texto)
@@ -325,6 +349,7 @@ def _a_invitado(chat_id: int | None, texto: str):
 
 def editar(mensaje: dict, texto: str):
     """Cambia el texto de un mensaje ya enviado (y le quita los botones)."""
+    texto = sin_emojis(texto)
     try:
         _api("editMessageText", data={"chat_id": mensaje["chat"]["id"], "message_id": mensaje["message_id"],
                                       "text": texto[:MAX_TEXTO]})
@@ -333,6 +358,7 @@ def editar(mensaje: dict, texto: str):
 
 
 def responder_boton(callback_id: str, texto: str = ""):
+    texto = sin_emojis(texto)
     try:
         _api("answerCallbackQuery", data={"callback_query_id": callback_id, "text": texto})
     except Exception:
@@ -341,6 +367,7 @@ def responder_boton(callback_id: str, texto: str = ""):
 
 def enviar_foto(jpg: bytes, texto: str = "", chat_id: int | None = None, html: bool = False,
                 botones: list | None = None) -> bool:
+    texto = sin_emojis(texto)
     if _para_app(texto, jpg, chat_id, botones):
         return True
     if not configurado():
@@ -350,8 +377,7 @@ def enviar_foto(jpg: bytes, texto: str = "", chat_id: int | None = None, html: b
     if html:
         datos["parse_mode"] = "HTML"
     if botones:
-        datos["reply_markup"] = json.dumps({"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in fila]
-                                                                for fila in botones]})
+        datos["reply_markup"] = _botones_limpios(botones)
     try:
         _api("sendPhoto", timeout=60, data=datos, files={"photo": ("camara.jpg", jpg, "image/jpeg")})
         _a_invitado(chat_id, f"[foto del cuarto] {texto}")
@@ -393,7 +419,7 @@ def enviar_voz(ogg: bytes, texto: str = "", chat_id: int | None = None) -> bool:
     if not configurado():
         return False
     try:
-        _api("sendVoice", timeout=60, data={"chat_id": chat_id or _config()["chat_id"], "caption": texto[:1000]},
+        _api("sendVoice", timeout=60, data={"chat_id": chat_id or _config()["chat_id"], "caption": sin_emojis(texto)[:1000]},
              files={"voice": ("jarvis.ogg", ogg, "audio/ogg")})
         return True
     except Exception as exc:

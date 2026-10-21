@@ -210,6 +210,9 @@ def api_command():
             fotos.append({"jpg": base64.b64encode(e["foto"]).decode("ascii"), "texto": e["texto"]})
         elif e["texto"]:
             responses.append(e["texto"])
+    responses = [r for r in (telegram.sin_emojis(r) for r in responses) if r and r.strip()]  # Jarvis sin emojis
+    for f in fotos:
+        f["texto"] = telegram.sin_emojis(f["texto"])
     return jsonify({"responses": responses, "fotos": fotos, "exit": not keep_going})
 
 
