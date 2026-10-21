@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 
 log = logging.getLogger(__name__)
+log_jarvis = logging.getLogger("jarvis.alarma")  # jarvis.log: llegadas confirmadas y cambios de luz
 
 MODELOS = Path(os.environ.get("JARVIS_CAMARA_MODELOS", Path.home() / "modelos" / "camara"))
 DATOS = Path(__file__).resolve().parent.parent
@@ -60,6 +61,38 @@ APRENDER_CADA_S = 0.5  # entre muestras: que salgan varios angulos
 VISTA_ANCHO = 64  # columnas de la vista previa (cada caracter son 2 pixeles de alto)
 GESTOS = {"Open_Palm": "palma", "Thumb_Up": "pulgar", "Victory": "victoria"}
 
+# Llegadas confirmadas (2026-10-21: la vigilancia mandaba alertas falsas, 26
+# "llegadas" en un día, por cambios de luz). Antes bastaba UN cuadro con una cara
+# (YuNet a 0.7) o una "persona" (EfficientDet a 0.45, de cualquier tamaño).
+# Ahora hacen falta CONFIRMAR_N detecciones fuertes en CONFIRMAR_S segundos
+# (mientras se confirma, el detector de personas corre en cada cuadro).
+CONFIRMAR_S = 4.0
+CONFIRMAR_N = 3
+CARA_MIN_CONF = 0.8
+CARA_MIN_LADO = 16  # px en la imagen de analisis (320x180)
+PERSONA_MIN_SCORE = 0.55
+PERSONA_MIN_AREA = 0.03  # fraccion de la imagen
+# Movimiento: se compara la ESTRUCTURA de la imagen (log del brillo menos su
+# version muy suavizada), no el brillo: la luz multiplica el brillo y varia
+# suave por el cuarto (lampara de un lado, sol por la ventana), asi que se
+# cancela; una persona cambia bordes y siluetas. Medido con cuadros sinteticos
+# (2026-10-21): luz pareja, a la mitad, lampara de un lado o sol en diagonal
+# <= 0.3% de la imagen; una persona entrando ~12%. Ademas, si el brillo medio
+# salta mas de LUZ_SALTO (o cambia mas de LUZ_FRACCION de la imagen) fue un
+# cambio de luz y por LUZ_CALMA_S (la camara reajusta la exposicion) no se
+# confia en el movimiento ni en las detecciones.
+ESTRUCTURA_SIGMA = 10
+MOV_UMBRAL = 0.18  # diferencia en log del brillo (~20% de contraste local)
+MOV_MIN_FRACCION = 0.01
+LUZ_SALTO = 0.15
+LUZ_FRACCION = 0.45
+LUZ_CALMA_S = 3.0
+# En vigilancia, ademas, la llegada necesita movimiento considerable: una mancha
+# de al menos MOV_FUERTE_AREA de la imagen en los ultimos VIGILANCIA_MOV_S.
+MOV_FUERTE_AREA = 0.01
+VIGILANCIA_MOV_S = 6.0
+VIGILANCIA_LEER_S = 5.0  # cada cuanto se relee si la vigilancia esta activa
+
 
 def _load_json(path: Path, default):
     try:
@@ -88,6 +121,35 @@ def _guardar_config(**cambios):
 
 def _guardar_habilitada(valor: bool):
     _guardar_config(encendida=valor)
+
+
+def movimiento(cv2, gray, prev) -> tuple[float, float]:
+    """(fraccion de la imagen que cambio, fraccion de la mancha mas grande).
+    gray y prev: la estructura de dos cuadros (ver _gris)."""
+    mask = (np.abs(gray - prev) > MOV_UMBRAL).astype(np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))  # puntitos de ruido fuera
+    frac = float(mask.mean())
+    if frac < MOV_MIN_FRACCION:
+        return frac, 0.0
+    n, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    mancha = float(stats[1:, cv2.CC_STAT_AREA].max()) / mask.size if n > 1 else 0.0
+    return frac, mancha
+
+
+def _gris(cv2, small) -> tuple[np.ndarray, float]:
+    """(estructura del cuadro, brillo medio). Estructura: log del brillo menos su
+    version muy suavizada; lo que hace la luz (multiplicar, suave) se cancela."""
+    g = cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (5, 5), 0).astype(np.float32)
+    lg = np.log1p(g)
+    return lg - cv2.GaussianBlur(lg, (0, 0), ESTRUCTURA_SIGMA), float(g.mean())
+
+
+def _vigilancia_activa() -> bool:
+    try:
+        from . import vigilancia
+        return vigilancia.activa()
+    except Exception:
+        return False
 
 
 def vista_previa(cv2, small, cara, n: int, meta: int, guardo: bool):
@@ -270,8 +332,13 @@ class Camara:
         self._aprendiendo = None
         self._preview = None
         self._aprender_meta = 0
-        prev_gray = None
+        prev_gray, prev_brillo = None, 0.0
         ultimo_mov = 0.0
+        mov_fuerte = 0.0  # ultima mancha de movimiento grande (vigilancia)
+        luz_t = 0.0  # ultimo cambio de luz
+        luz_log = 0.0
+        hits = deque()  # detecciones fuertes mientras no hay nadie (confirmar la llegada)
+        vigilando, vig_leida = False, 0.0
         ultima_persona = 0.0
         gestos = deque(maxlen=4)
         disparado = None  # gesto ya avisado: no se repite hasta que se suelte
@@ -300,29 +367,59 @@ class Camara:
                 small = frame if frame.shape[1] == ANCHO else cv2.resize(frame, (ANCHO, ALTO), interpolation=cv2.INTER_AREA)
                 ahora = time.time()
 
-                # movimiento (barato): diferencia con el cuadro anterior
-                gray = cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (9, 9), 0)
-                if prev_gray is not None and np.mean(cv2.absdiff(gray, prev_gray) > 25) > 0.01:
-                    ultimo_mov = ahora
-                prev_gray = gray
+                # movimiento (barato): la estructura contra el cuadro anterior (la luz no cuenta)
+                gray, brillo = _gris(cv2, small)
+                if prev_gray is not None:
+                    frac, mancha = movimiento(cv2, gray, prev_gray)
+                    salto = abs(brillo - prev_brillo) / max(prev_brillo, 1.0)
+                    if salto > LUZ_SALTO or frac > LUZ_FRACCION:
+                        luz_t = ahora
+                        if ahora - luz_log > 30:
+                            luz_log = ahora
+                            log_jarvis.info(f"camara: cambio de luz (brillo {salto:+.0%}, {frac:.0%} de la imagen); "
+                                     "no cuenta como movimiento")
+                    elif frac > MOV_MIN_FRACCION and ahora - luz_t > LUZ_CALMA_S:
+                        ultimo_mov = ahora
+                        if mancha >= MOV_FUERTE_AREA:
+                            mov_fuerte = ahora
+                prev_gray, prev_brillo = gray, brillo
+                if ahora - vig_leida >= VIGILANCIA_LEER_S:
+                    vigilando, vig_leida = _vigilancia_activa(), ahora
 
                 # caras en cada cuadro
                 _, caras = self._det.detect(small)
                 visto = caras is not None and len(caras) > 0
                 cara = max(caras, key=lambda c: c[2] * c[3]) if visto else None
+                fuerte = visto and any(c[14] >= CARA_MIN_CONF and min(c[2], c[3]) >= CARA_MIN_LADO for c in caras)
+                confirmando = not self._presente and bool(hits)
 
-                # personas (cuerpo) si no hay cara: de espaldas o lejos
-                if not visto and ahora - ultima_persona >= PERSONA_CADA_S and ahora - ultimo_mov < AUSENTE_S:
+                # personas (cuerpo) si no hay cara: de espaldas o lejos (en cada cuadro mientras se confirma)
+                if (not visto and (ahora - ultima_persona >= PERSONA_CADA_S or confirmando)
+                        and ahora - ultimo_mov < AUSENTE_S):
                     ultima_persona = ahora
                     dets = self._personas.detect(self._mp_image(small)).detections
                     visto = bool(dets)
                     vista["persona"] = dets[0].bounding_box if dets else None
+                    fuerte = any(d.categories[0].score >= PERSONA_MIN_SCORE
+                                 and d.bounding_box.width * d.bounding_box.height >= PERSONA_MIN_AREA * ANCHO * ALTO
+                                 for d in dets)
                 elif visto:
                     vista["persona"] = None
 
-                if visto:
-                    self._ultima_vez = ahora
-                    if not self._presente:
+                if self._presente:
+                    if visto:
+                        self._ultima_vez = ahora
+                else:
+                    # llegada: varias detecciones fuertes seguidas, nunca justo tras un cambio de luz
+                    if fuerte and ahora - luz_t > LUZ_CALMA_S:
+                        hits.append(ahora)
+                    while hits and ahora - hits[0] > CONFIRMAR_S:
+                        hits.popleft()
+                    if len(hits) >= CONFIRMAR_N and (not vigilando or ahora - mov_fuerte < VIGILANCIA_MOV_S):
+                        log_jarvis.info(f"camara: llegada confirmada ({len(hits)} detecciones en {ahora - hits[0]:.1f} s"
+                                 f"{', con movimiento' if ahora - mov_fuerte < VIGILANCIA_MOV_S else ''})")
+                        hits.clear()
+                        self._ultima_vez = ahora
                         self._presente = True
                         ausencia = ahora - self._ausente_desde
                         if ausencia >= LLEGADA_MIN_AUSENCIA_S:
@@ -330,7 +427,7 @@ class Camara:
                                 reconocer_hasta = ahora + RECONOCER_S  # avisa al saber quien es (o al rendirse)
                             else:
                                 self._emit("llegada", None)
-                elif self._presente and ahora - self._ultima_vez >= AUSENTE_S:
+                if self._presente and not visto and ahora - self._ultima_vez >= AUSENTE_S:
                     self._presente = False
                     self._ausente_desde = ahora
                     reconocer_hasta = 0.0
