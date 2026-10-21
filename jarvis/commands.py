@@ -274,7 +274,9 @@ def _handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
         respond(resp)
         agent.anotar(text, resp)
         return True
-    rapida = charla.rapida(text, "señor", recientes, acks=False)
+    # "¿quién eres?", "¿dónde vives?", "¿cómo te sientes?": sabe en qué equipo vive (conciencia.py)
+    from . import conciencia
+    rapida = conciencia.responder(text, "señor", es_dueno=True) or charla.rapida(text, "señor", recientes, acks=False)
     if rapida:
         respond(rapida)
         agent.anotar(text, rapida)

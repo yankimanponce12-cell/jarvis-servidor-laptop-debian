@@ -738,7 +738,8 @@ def _platicar(chat_id: int, texto: str) -> str:
     hist = _historial.setdefault(chat_id, [])
     recientes = [m["content"] for m in hist if m["role"] == "assistant"][-4:]
     trato = "señorita" if es_novia(chat_id) else "señor"
-    rapida = charla.rapida(texto, trato, recientes)
+    from . import conciencia  # "¿dónde vives?", "¿cómo te sientes?": con datos reales del equipo
+    rapida = conciencia.responder(texto, trato, _dueno()) or charla.rapida(texto, trato, recientes)
     if rapida:
         hist += [{"role": "user", "content": texto}, {"role": "assistant", "content": rapida}]
         del hist[:-HISTORIAL]

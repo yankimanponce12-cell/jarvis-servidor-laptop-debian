@@ -220,13 +220,16 @@ def _api(metodo: str, timeout: float = 20, **kwargs):
     return data["result"]
 
 
-def enviar(texto: str, chat_id: int | None = None, botones: list | None = None) -> bool:
+def enviar(texto: str, chat_id: int | None = None, botones: list | None = None, html: bool = False) -> bool:
     """Manda un mensaje (al dueño si no se dice a quién). botones: filas de
-    (texto, dato) que vuelven como callback_query. False si falló."""
+    (texto, dato) que vuelven como callback_query. html: con <b>, <i>, <pre>
+    (modo_demo.py). False si falló."""
     if not configurado():
         return False
     texto = _trato(chat_id, texto)
     datos = {"chat_id": chat_id or _config()["chat_id"], "text": texto[:MAX_TEXTO]}
+    if html:
+        datos["parse_mode"] = "HTML"
     if botones:
         datos["reply_markup"] = json.dumps({"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in fila]
                                                                 for fila in botones]})
@@ -278,13 +281,15 @@ def responder_boton(callback_id: str, texto: str = ""):
         pass
 
 
-def enviar_foto(jpg: bytes, texto: str = "", chat_id: int | None = None) -> bool:
+def enviar_foto(jpg: bytes, texto: str = "", chat_id: int | None = None, html: bool = False) -> bool:
     if not configurado():
         return False
     texto = _trato(chat_id, texto)
+    datos = {"chat_id": chat_id or _config()["chat_id"], "caption": texto[:1000]}
+    if html:
+        datos["parse_mode"] = "HTML"
     try:
-        _api("sendPhoto", timeout=60, data={"chat_id": chat_id or _config()["chat_id"], "caption": texto[:1000]},
-             files={"photo": ("camara.jpg", jpg, "image/jpeg")})
+        _api("sendPhoto", timeout=60, data=datos, files={"photo": ("camara.jpg", jpg, "image/jpeg")})
         _a_invitado(chat_id, f"[foto del cuarto] {texto}")
         return True
     except Exception as exc:
@@ -424,7 +429,9 @@ class Bot:
                 if boton:  # el dueño contestó "¿le das permiso?" (invitados.py) o "¿apago la tele?" (mensajes.py)
                     de = (boton.get("from") or {}).get("id")
                     dato = boton.get("data") or ""
-                    if dato.startswith("nov:") and (de == dueno or invitados.es_novia(de)):  # trivia, dato... (novia.py)
+                    if dato.startswith("demo:") and de == dueno:  # botones del final del modo demo
+                        threading.Thread(target=self._boton_demo, args=(dato, boton["id"]), daemon=True).start()
+                    elif dato.startswith("nov:") and (de == dueno or invitados.es_novia(de)):  # trivia, dato... (novia.py)
                         from . import novia
                         threading.Thread(target=novia.callback, daemon=True,
                                          args=(dato, boton["id"], boton.get("message") or {}, de)).start()
@@ -514,6 +521,15 @@ class Bot:
             if resp:
                 self._contestar(resp, por_voz, texto if por_voz else "", chat_id=chat_id)
 
+    def _boton_demo(self, dato: str, callback_id: str):
+        """Botón del final del modo demo: se hace como si el dueño lo hubiera escrito."""
+        from . import modo_demo
+        responder_boton(callback_id)
+        if dato == "demo:reloj":
+            enviar(modo_demo.saludo_reloj())
+        elif dato in modo_demo.BOTONES:
+            self._atender(modo_demo.BOTONES[dato])
+
     def _contestar(self, texto: str, por_voz: bool, entendi: str = "", chat_id: int | None = None):
         texto = _trato(chat_id, texto)  # tambien lo que se dice en la nota de voz
         if por_voz and self._sintetizar is not None:
@@ -539,6 +555,13 @@ class Bot:
             self._hud.log(f"📱 Telegram{' 🎙' if por_voz else ''}: {texto}")
         entendi = texto if por_voz else ""
         try:
+            from . import modo_demo  # "modo demo": la presentación para enseñar el proyecto
+            if modo_demo.corriendo() and modo_demo.es_parar(texto):
+                modo_demo.parar()
+                return
+            if modo_demo.es_pedido(texto):
+                threading.Thread(target=modo_demo.correr, args=(self, texto, por_voz), daemon=True, name="demo").start()
+                return
             if re.sub(r"[^\w ]", "", texto.lower().translate(str.maketrans("áéíóú", "aeiou"))).strip() in ("start", "ayuda", "help", "comandos", "lista de comandos",
                                                               "que puedes hacer", "que puedo hacer"):
                 for parte in AYUDA:
