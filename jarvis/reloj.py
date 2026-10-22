@@ -147,8 +147,10 @@ class Enlace:
             for ev in datos.get("eventos") or []:
                 threading.Thread(target=self._evento, args=(str(ev),), daemon=True).start()
             self._revisar_bateria()
-            # con la pantalla apagada el reloj pide preguntar cada 5 s (no hay botones que leer: menos WiFi, más batería)
-            espera = 5.0 if (datos.get("siguiente_ms") or 0) >= 5000 else CADA_S
+            # con la pantalla apagada el reloj pide preguntar cada 5 s, o 10 con batería baja (no hay
+            # botones que leer: menos WiFi, más batería); se respeta hasta 10 s
+            siguiente = (datos.get("siguiente_ms") or 0) / 1000
+            espera = min(siguiente, 10.0) if siguiente >= 5 else CADA_S
             ahora = time.time()
             if ahora - self._ultima_musica >= MUSICA_CADA_S:
                 self._ultima_musica = ahora
