@@ -117,7 +117,8 @@ La tele: usa los comandos `tele`, `modo-tele` y `modo-juego` de `~/.local/bin`
 
 ```
 listener.py: Vosk ("jarvis", siempre escuchando, ~3% de un hilo)
-             └─ si lo oyó: Whisper base transcribe la frase y confirma "Jarvis"
+             └─ si lo oyó: la frase va a Google (stt_google.py, Chrome sin ventana);
+                sin internet o sin respuesta, Whisper (stt_gpu.py). Vale si dice "Jarvis"
          -> wakeword.py -> commands.py (regex, instantáneo)
                                 |  si no coincide
                                 v
@@ -145,6 +146,14 @@ tui.py + hud.py: interfaz de terminal (Textual)
   detecta "jarvis" casi sin gastar CPU, y Whisper solo corre en esas frases
   (y la orden solo vale si Whisper también escribe "Jarvis", porque Vosk da
   falsas alarmas).
+- **Google para entender:** el reconocimiento del navegador solo existe dentro
+  de Google Chrome, así que `stt_google.py` abre uno sin ventana cuyo micrófono
+  es un micro virtual. Solo le llega lo que es para Jarvis (desde que Vosk oye
+  "jarvis", o la respuesta a una pregunta) y eso sí sale a los servidores de
+  Google; lo demás no sale de la laptop. Entiende mejor que Whisper de cerca y a
+  media distancia, tarda ~0.7 s menos y con ruido no inventa frases. Requiere
+  `google-chrome`; sin él, sin internet o con `JARVIS_STT_GOOGLE=0` queda Whisper.
+  `bin/prueba_chrome_stt.py` los compara con la voz real.
 - **IA en la gráfica:** Qwen3 1.7B Q4 en llama.cpp con **Vulkan** sobre la
   Radeon Vega 3 integrada: lee el prompt a ~76 tokens/s (la CPU, 20) y escribe
   a ~9.5 tokens/s (casi igual que la CPU, lo limita la RAM compartida). Deja la

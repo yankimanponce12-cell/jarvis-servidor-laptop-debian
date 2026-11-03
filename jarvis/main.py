@@ -14,7 +14,7 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import logging
 
-from jarvis import agent, audio_focus, brain, camara, demo, interrupt, llm, memory, stt_gpu, system, voice_config, voice_output, whatsapp
+from jarvis import agent, audio_focus, brain, camara, demo, interrupt, llm, memory, stt_google, stt_gpu, system, voice_config, voice_output, whatsapp
 from jarvis import casa
 from jarvis import server as jarvis_server
 from jarvis.commands import _is_affirmative, handle_command
@@ -635,7 +635,7 @@ class Session:
         # primero los servidores (lo mas pesado: si algo de abajo falla o tarda,
         # que no queden huerfanos ocupando la RAM y la grafica), y cada paso
         # por separado: una excepcion en uno no debe saltarse los demas
-        for paso in (llm.shutdown, stt_gpu.shutdown, voice_output.stop,
+        for paso in (llm.shutdown, stt_gpu.shutdown, stt_google.shutdown, voice_output.stop,
                      audio_focus.restore_now,  # que la musica no quede atenuada
                      lambda: self.camara and self.camara.stop(), whatsapp.close):
             try:

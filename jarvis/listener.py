@@ -1,5 +1,6 @@
 import collections
 import datetime
+import difflib
 import json
 import os
 import queue
@@ -12,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
-from jarvis import aplausos, en_vivo, mic_config, stt_gpu, wakeword
+from jarvis import aplausos, en_vivo, mic_config, stt_google, stt_gpu, wakeword
 
 SAMPLE_RATE = 16000
 FRAME = 512  # muestras por trama de audio (32 ms): el tamaño que exige el VAD Silero a 16 kHz
@@ -88,6 +89,30 @@ _HALLUCINATIONS = re.compile(
     re.IGNORECASE,
 )
 
+# Whisper tambien "rellena" con la lista de ejemplos de su prompt, un poco cambiada ("Suba el
+# volumen. Pon música de rock. Conecta el Bluetooth."), y con ruidos entre corchetes ("[Motor]").
+# Una sola frase parecida puede ser una orden de verdad ("Jarvis, abre Spotify"): dos ya no.
+_SOLO_RUIDO = re.compile(r"^\W*[\[(].*[\])]\W*$")
+ECO_PARECIDO = 0.7
+ECO_FRASES = 2
+
+
+def _frases(text: str) -> list[str]:
+    frases = (re.sub(r"\W+", " ", f.lower()).strip() for f in re.split(r"[.!?]+", text))
+    return [f for f in frases if f]
+
+
+_FRASES_PROMPT = _frases(WAKE_WORD_PROMPT)
+
+
+def _es_eco_del_prompt(text: str) -> bool:
+    parecidas = sum(
+        any(difflib.SequenceMatcher(None, frase, ejemplo).ratio() >= ECO_PARECIDO for ejemplo in _FRASES_PROMPT)
+        for frase in _frases(text)
+    )
+    return parecidas >= ECO_FRASES
+
+
 FINAL_DECODE = dict(beam_size=5, temperature=(0.0, 0.2, 0.4), no_speech_threshold=0.6, without_timestamps=True)
 
 
@@ -114,10 +139,7 @@ def clean_transcript(text: str) -> str:
     """Descarta lo que Whisper inventa cuando no hay voz real, y el eco del
     prompt inicial."""
     text = text.strip()
-    if not text or _HALLUCINATIONS.search(text):
-        return ""
-    plain = re.sub(r"\W+", " ", text.lower()).strip()
-    if plain and plain in re.sub(r"\W+", " ", WAKE_WORD_PROMPT.lower()) and len(plain.split()) > 2:
+    if not text or _HALLUCINATIONS.search(text) or _SOLO_RUIDO.match(text) or _es_eco_del_prompt(text):
         return ""
     return text
 
@@ -405,6 +427,14 @@ def _platica_de_fondo(audio: np.ndarray) -> bool:
     return mic_config.rms_to_db(float(np.sqrt(np.mean(audio**2)))) < FONDO_MAX_DB
 
 
+def _sin_jarvis_mal_oido(texto: str) -> str:
+    """Quita la primera palabra si se parece a "Jarvis" aunque no tanto como para
+    contar sola ("derbis modo juego" -> "modo juego")."""
+    primera, _, resto = texto.partition(" ")
+    parecido = difflib.SequenceMatcher(None, primera.lower().strip(".,¡!¿?"), "jarvis").ratio()
+    return resto if resto and parecido >= 0.5 else texto
+
+
 def _log_utterance(audio: np.ndarray, vosk: bool, whisper: str, final: str, note: str = ""):
     """Una linea por frase en logs/escucha.log: duracion, nivel, si Vosk oyo
     "jarvis", que escribio Whisper y que se le paso a Jarvis."""
@@ -442,6 +472,8 @@ class VoiceListener:
         # mucho mejor). faster-whisper "base" en la CPU queda cargado de
         # respaldo por si el servidor de la grafica falla (small en CPU: ~7 s).
         self._gpu = stt_gpu.start(WAKE_WORD_PROMPT)
+        # Google entiende mejor; Whisper queda para cuando no hay internet (stt_google.py)
+        threading.Thread(target=stt_google.start, daemon=True).start()
         print("Whisper small en la gráfica (Vulkan)." if self._gpu else "Whisper en la CPU (sin la gráfica).")
         model_size = model_size or os.environ.get("JARVIS_WHISPER_MODEL", "base")
         if device is None or compute_type is None:
@@ -473,6 +505,8 @@ class VoiceListener:
         self._ring = collections.deque(maxlen=int(BARGE_WINDOW_S / FRAME_S))
         self._barge_countdown = 0  # tramas que faltan para verificar una posible interrupcion
         self._barge_busy = False
+        self._pendiente_google = False  # Vosk oyo "jarvis" antes de que empezara la frase
+        self.ultima_fuente = "whisper"  # quien entendio la ultima frase (para escucha.log)
 
     def open_follow_up(self, seconds: float):
         """Jarvis acaba de hacer una pregunta: la frase que se EMPIECE a decir
@@ -514,6 +548,8 @@ class VoiceListener:
 
     def _next_utterance(self, q, endpointer: Endpointer, language: str = "es", spot: bool = False) -> np.ndarray:
         """Lee tramas de la cola hasta que el Endpointer cierra una frase."""
+        stt_google.cancelar()  # la sesion de una frase anterior que resulto no ser para Jarvis
+        self._pendiente_google = False
         while True:
             frame = q.get()
             mic_config.report_level(float(np.sqrt(np.mean(frame**2))))  # medidor de la interfaz
@@ -523,6 +559,8 @@ class VoiceListener:
                 words = self._spotter.feed(frame)
                 if words:
                     self._on_keywords(words)
+                    if WAKE_KEYWORD in words and not self._speaking():
+                        self._pendiente_google = True
                 if self._barge_countdown:
                     self._barge_countdown -= 1
                     if not self._barge_countdown and self._speaking():
@@ -530,7 +568,17 @@ class VoiceListener:
             if self._reset_requested:  # flush_pending_audio: lo que habia a medias era el eco de Jarvis
                 self._reset_requested = False
                 endpointer.reset()
+                stt_google.cancelar()
+                self._pendiente_google = False
+            # A Google solo se le manda lo que es para Jarvis: la frase desde que Vosk oye
+            # "jarvis" (con lo ya grabado de ella) o la respuesta a una pregunta.
+            if (spot and endpointer.speaking and not stt_google.activa()
+                    and (self._pendiente_google or self.follow_up_open()) and not self._speaking()):
+                self._pendiente_google = False
+                stt_google.comenzar(endpointer.audio_so_far())
             audio = endpointer.feed(frame)
+            if spot:
+                stt_google.alimentar(frame)
             if audio is not None:
                 return audio
 
@@ -586,6 +634,21 @@ class VoiceListener:
         except Exception as exc:
             print(f"No se pudo transcribir ese audio, se descarta: {exc}")
             return ""
+
+    def _entender(self, audio: np.ndarray, language: str, para_jarvis: bool) -> str:
+        """Lo que dijo la frase: Google si la oyo y contesto, si no Whisper. Con
+        para_jarvis, Vosk puede haber dado una falsa alarma y hace falta que alguien
+        escriba "Jarvis"; si Google no lo escribe ("derbis modo juego"), decide Whisper."""
+        self.ultima_fuente = "whisper"
+        texto = stt_google.terminar()
+        if not texto:
+            return self._safe_transcribe(audio, language)
+        self.ultima_fuente = "google"
+        if para_jarvis and not wakeword.with_wake_prefix(texto):
+            if not wakeword.with_wake_prefix(self._safe_transcribe(audio, language)):
+                return ""
+            return f"Jarvis, {_sin_jarvis_mal_oido(texto)}"
+        return texto
 
     def listen_and_transcribe(self, language="es", on_partial=None):
         """Una sola frase: empieza a escuchar ya (el usuario acaba de pulsar
@@ -658,7 +721,7 @@ class VoiceListener:
                     continue
                 text = raw = ""
                 if follow_up and not self._speaking():
-                    raw = self._safe_transcribe(audio, language)
+                    raw = self._entender(audio, language, para_jarvis=False)
                     if raw and self.is_echo is not None and self.is_echo(raw, began):
                         _log_utterance(audio, for_jarvis, raw, "", "(eco de la voz de Jarvis, ignorado)")
                         if yield_empty:
@@ -667,15 +730,15 @@ class VoiceListener:
                     self.close_follow_up()  # una sola respuesta por pregunta
                     text = (wakeword.with_wake_prefix(raw) or f"Jarvis, {raw}") if raw else ""
                     self.last_follow_up = bool(text)
-                    _log_utterance(audio, for_jarvis, raw, text, "(respuesta a una pregunta de Jarvis)")
+                    _log_utterance(audio, for_jarvis, raw, text, f"(respuesta a una pregunta de Jarvis, {self.ultima_fuente})")
                     if text or yield_empty:
                         yield text
                     continue
                 if audio.size and for_jarvis:
                     if on_partial is not None:
                         on_partial("Jarvis…")  # la interfaz baja la musica mientras Whisper transcribe
-                    # solo vale si Whisper tambien oyo "Jarvis" (Vosk da falsas alarmas)
-                    raw = self._safe_transcribe(audio, language)
+                    # solo vale si tambien se entendio "Jarvis" (Vosk da falsas alarmas)
+                    raw = self._entender(audio, language, para_jarvis=True)
                     text = wakeword.with_wake_prefix(raw) or ""
                     if text and self.is_echo is not None and self.is_echo(raw, began):
                         _log_utterance(audio, for_jarvis, raw, "", "(eco de la voz de Jarvis, ignorado)")
@@ -683,7 +746,7 @@ class VoiceListener:
                             yield ""
                         continue
                 if audio.size:
-                    _log_utterance(audio, for_jarvis, raw, text)
+                    _log_utterance(audio, for_jarvis, raw, text, f"({self.ultima_fuente})" if raw else "")
                 if text or yield_empty:
                     yield text
 
