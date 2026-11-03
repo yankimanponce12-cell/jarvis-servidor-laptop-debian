@@ -76,3 +76,4 @@ novia_estado.json
 
 # clave API_TOKEN del reloj (secrets.h del firmware)
 reloj_token.txt
+sonidos_config.json

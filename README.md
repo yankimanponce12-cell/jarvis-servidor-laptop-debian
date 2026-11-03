@@ -76,6 +76,7 @@ jarvis --mute           # no habla en voz alta
 | `F6`/`F7`| baja/sube el umbral del micrófono                   |
 | `F8`     | vista previa de las escenas del clima               |
 | `F9`     | muestra u oculta la cámara (panel dentro de la terminal) |
+| `F10`    | prende o apaga los efectos de sonido (también el botón ♪ de arriba, o "Jarvis, quita los efectos") |
 | `Ctrl+L` | nueva charla (borra el contexto corto, no la memoria) |
 | `Ctrl+Q` | salir (también "Jarvis, adiós")                     |
 

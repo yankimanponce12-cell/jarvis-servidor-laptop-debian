@@ -22,7 +22,7 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Button, Footer, Input, RichLog, Static
 
-from jarvis import audio_focus, mic_config, playback, weather_art
+from jarvis import audio_focus, mic_config, playback, sonidos, weather_art
 
 # (color apagado, color brillante) por estado
 PALETTE = {
@@ -626,6 +626,9 @@ class JarvisApp(App):
     #demo { width: 14; height: 1; border: none; background: #0e7490; color: #ecfeff; content-align: center middle;
             text-style: bold; margin: 0; padding: 0; }
     #demo:hover { background: #22d3ee; color: #05080a; }
+    #sonidos { width: 16; height: 1; border: none; background: #0e7490; color: #ecfeff; content-align: center middle; margin-right: 1; }
+    #sonidos:hover { background: #22d3ee; color: #05080a; }
+    #sonidos.-apagado { background: #374151; color: #9ca3af; }
     #demo.-running { background: #b45309; }
     #body { height: 1fr; }
     #left { width: 1fr; }
@@ -672,6 +675,7 @@ class JarvisApp(App):
         Binding("f7", "mic_mas", "Mic +"),
         Binding("f8", "clima", "Clima"),
         Binding("f9", "camara", "Cámara"),
+        Binding("f10", "sonidos", "Efectos"),
         Binding("ctrl+l", "olvidar", "Nueva charla"),
         Binding("escape", "escape", "Callar"),
     ]
@@ -690,6 +694,7 @@ class JarvisApp(App):
         with Vertical(id="root"):
             with Horizontal(id="topbar"):
                 yield Static(id="titlebar")
+                yield Button(self._texto_efectos(), id="sonidos", compact=True)
                 yield Button("▶ Demo", id="demo", compact=True)
             with Horizontal(id="body"):
                 with Vertical(id="left"):
@@ -729,6 +734,7 @@ class JarvisApp(App):
 
     # ---- barra de titulo -------------------------------------------------
     def _tick_title(self):
+        self._pintar_efectos()
         now = datetime.datetime.now().strftime("%H:%M:%S")
         parts = ["J.A.R.V.I.S", now]
         if self.weather:
@@ -779,6 +785,26 @@ class JarvisApp(App):
         if event.button.id == "demo":
             self.controller.on_demo()
             self.query_one("#entrada", Input).focus()
+        elif event.button.id == "sonidos":
+            self.action_sonidos()
+            self.query_one("#entrada", Input).focus()
+
+    @staticmethod
+    def _texto_efectos() -> str:
+        return "♪ Efectos: Sí" if sonidos.activos() else "♪ Efectos: No"
+
+    def _pintar_efectos(self):
+        """También si cambió por voz ("Jarvis, quita los efectos")."""
+        button = self.query_one("#sonidos", Button)
+        texto = self._texto_efectos()
+        if str(button.label) != texto:
+            button.label = texto
+        button.set_class(not sonidos.activos(), "-apagado")
+
+    def action_sonidos(self):
+        if sonidos.alternar():
+            sonidos.tocar("listo")  # para oír que quedó prendido
+        self._pintar_efectos()
 
     def action_silencio(self):
         self.controller.on_toggle_mute()

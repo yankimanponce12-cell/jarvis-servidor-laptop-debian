@@ -14,7 +14,7 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import logging
 
-from jarvis import agent, audio_focus, brain, camara, demo, interrupt, llm, memory, stt_google, stt_gpu, system, voice_config, voice_output, whatsapp
+from jarvis import agent, audio_focus, brain, camara, commands, demo, interrupt, llm, memory, sonidos, stt_google, stt_gpu, system, voice_config, voice_output, whatsapp
 from jarvis import casa
 from jarvis import server as jarvis_server
 from jarvis.commands import _is_affirmative, handle_command
@@ -41,6 +41,20 @@ BARGE_GRACE_S = 12
 # Plática natural: si Jarvis termina con una pregunta, el microfono queda
 # abierto este tiempo y se le puede contestar sin decir "Jarvis"
 FOLLOW_UP_S = 7
+
+
+# Una respuesta corta de un comando es la confirmacion de que ya se hizo (o de que no se pudo)
+_RESPUESTA_FALLIDA = re.compile(
+    r"^\W*(no |lo siento|perd[oó]n)|no pude|no puedo|no encontr|no entend|no se pudo|fall[oó]|error", re.IGNORECASE)
+RESPUESTA_CORTA = 60
+
+
+def _efecto_de_respuesta(msg: str) -> str | None:
+    if _RESPUESTA_FALLIDA.search(msg):
+        return "error"
+    if len(msg) <= RESPUESTA_CORTA and "?" not in msg:
+        return "listo"
+    return None
 
 
 class Session:
@@ -101,6 +115,27 @@ class Session:
         if self.listener is not None:
             self.listener.flush_pending_audio()  # evita que se escuche a si mismo
 
+    def _efecto(self, nombre: str):
+        if not self.muted:  # F4: en silencio, sin efectos tampoco
+            sonidos.tocar(nombre)
+
+    def _responder_con_efecto(self):
+        """respond() para una orden: antes de la primera frase, si es una confirmacion
+        corta suena "listo" (o "error" si no se pudo). La plática con la IA no lleva."""
+        primera = [True]
+
+        def responder(msg, *args, **kwargs):
+            if primera[0]:
+                primera[0] = False
+                efecto = None if commands.uso_ia else _efecto_de_respuesta(msg)
+                if efecto:
+                    self._efecto(efecto)
+            if not self.muted:
+                sonidos.esperar()  # lo que este sonando no lo pisa la voz
+            return self.respond(msg, *args, **kwargs)
+
+        return responder
+
     def _run_command(self, text: str, escuchar) -> bool:
         """Devuelve False si el usuario pidio salir."""
         self._busy = True
@@ -108,10 +143,11 @@ class Session:
         self._ask_pending = False
         self.hud.set_state("pensando")
         try:
-            keep_going = handle_command(text, respond=self.respond, escuchar=escuchar, hud=self.hud)
+            keep_going = handle_command(text, respond=self._responder_con_efecto(), escuchar=escuchar, hud=self.hud)
         except Exception as exc:
             # un comando que falla no debe cortar la escucha
             self.hud.log(f"El comando falló: {exc}", "bold red")
+            self._efecto("error")
             keep_going = True
         finally:
             self._busy = False
@@ -319,7 +355,13 @@ class Session:
         if not telegram.configurado():
             hud.log("Telegram sin configurar: venv/bin/python -m jarvis.telegram configurar <TOKEN>", "dim")
         hud.set_state("inactivo")
-        threading.Thread(target=self.respond, args=(greeting_for_time(),), daemon=True).start()
+        self._efecto("inicio")
+
+        def saludar():
+            sonidos.esperar()
+            self.respond(greeting_for_time())
+
+        threading.Thread(target=saludar, daemon=True).start()
         saludos.marcar_buenos_dias()  # en la mañana, el saludo al arrancar ya cuenta como "buenos días"
         self._flush()
 
@@ -345,6 +387,8 @@ class Session:
         self.listener.barge_in_active = voice_output.is_speaking
         self.listener.is_echo = voice_output.is_echo
         self.listener.on_barge_in = self._on_barge_in
+        self.listener.on_no_entendi = lambda: self._efecto("error")
+        stt_google.al_perder_red = lambda: self._efecto("sinred")
         try:
             for text in self.listener.listen_forever(on_partial=self._on_partial, yield_empty=True):
                 self._on_utterance(text)
@@ -412,6 +456,7 @@ class Session:
             return
         if not ducked:
             audio_focus.duck()
+        self._efecto("escucha")
         threading.Thread(target=self._voice_command, args=(command,), daemon=True).start()
 
     def _voice_command(self, command: str):
@@ -632,6 +677,8 @@ class Session:
                 return
             self._closed = True
         mensajes.apagado_limpio()  # al arrancar no dirá "me reinicié de golpe"
+        self._efecto("cierre")
+        sonidos.esperar()
         # primero los servidores (lo mas pesado: si algo de abajo falla o tarda,
         # que no queden huerfanos ocupando la RAM y la grafica), y cada paso
         # por separado: una excepcion en uno no debe saltarse los demas

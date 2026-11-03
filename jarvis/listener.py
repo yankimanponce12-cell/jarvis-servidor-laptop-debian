@@ -507,6 +507,7 @@ class VoiceListener:
         self._barge_busy = False
         self._pendiente_google = False  # Vosk oyo "jarvis" antes de que empezara la frase
         self.ultima_fuente = "whisper"  # quien entendio la ultima frase (para escucha.log)
+        self.on_no_entendi = None  # lo pone main.py: se oyo "jarvis" y nadie entendio nada
 
     def open_follow_up(self, seconds: float):
         """Jarvis acaba de hacer una pregunta: la frase que se EMPIECE a decir
@@ -646,7 +647,7 @@ class VoiceListener:
         self.ultima_fuente = "google"
         if para_jarvis and not wakeword.with_wake_prefix(texto):
             if not wakeword.with_wake_prefix(self._safe_transcribe(audio, language)):
-                return ""
+                return texto  # falsa alarma de Vosk: sin "Jarvis" no se le pasa a nadie
             return f"Jarvis, {_sin_jarvis_mal_oido(texto)}"
         return texto
 
@@ -739,6 +740,8 @@ class VoiceListener:
                         on_partial("Jarvis…")  # la interfaz baja la musica mientras Whisper transcribe
                     # solo vale si tambien se entendio "Jarvis" (Vosk da falsas alarmas)
                     raw = self._entender(audio, language, para_jarvis=True)
+                    if not raw and self.on_no_entendi is not None:
+                        self.on_no_entendi()
                     text = wakeword.with_wake_prefix(raw) or ""
                     if text and self.is_echo is not None and self.is_echo(raw, began):
                         _log_utterance(audio, for_jarvis, raw, "", "(eco de la voz de Jarvis, ignorado)")

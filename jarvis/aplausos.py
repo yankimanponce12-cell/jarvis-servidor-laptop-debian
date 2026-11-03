@@ -40,6 +40,7 @@ _ultimo = -10**9  # bloque del ultimo aplauso
 _aplausos = collections.deque(maxlen=16)  # time.monotonic() de cada aplauso
 _lock = threading.Lock()
 _avisar = []  # funciones a llamar en cada aplauso (entrada.py)
+_ignorar_hasta = 0.0  # suena un efecto de Jarvis (sonidos.py): lo que se oiga no es un aplauso
 diagnostico = None  # funcion(texto): anota cada golpe que casi fue aplauso (para calibrar)
 
 
@@ -80,8 +81,15 @@ def alimentar(frame: np.ndarray):
                 _registrar()
 
 
+def ignorar_hasta(t: float):
+    global _ignorar_hasta
+    _ignorar_hasta = max(_ignorar_hasta, t)
+
+
 def _registrar():
     ahora = time.monotonic()
+    if ahora < _ignorar_hasta:
+        return
     with _lock:
         _aplausos.append(ahora)
         avisar = list(_avisar)

@@ -96,6 +96,8 @@ _numero = 0
 _sin_red_hasta = 0.0
 _ultimo_arranque = 0.0
 _cerrando = False
+_red_avisada = False  # ya se aviso que no hay red; se limpia cuando Google vuelve a contestar
+al_perder_red = None  # lo pone main.py: se llama una vez cada que se pierde la red
 
 
 def _navegador() -> str | None:
@@ -142,7 +144,7 @@ class _Manejador(BaseHTTPRequestHandler):
 
 
 def _evento(datos: dict):
-    global _sin_red_hasta
+    global _sin_red_hasta, _red_avisada
     tipo = datos.get("tipo")
     if tipo == "lista":
         _lista.set()
@@ -158,6 +160,9 @@ def _evento(datos: dict):
         if datos.get("error") in _ERRORES_SIN_RED:
             _sin_red_hasta = time.monotonic() + SIN_RED_S
             logger.info("Google no disponible (%s): uso Whisper %d s", datos.get("error"), SIN_RED_S)
+            if not _red_avisada and al_perder_red is not None:
+                _red_avisada = True
+                al_perder_red()
     elif tipo == "fin":
         sesion.fin.set()
 
@@ -315,7 +320,7 @@ def cancelar():
 def terminar() -> str | None:
     """La frase ya acabo: espera a que Google la entregue. El texto, o None si
     no entendio nada o no contesto (el llamador sigue con Whisper)."""
-    global _sesion
+    global _sesion, _red_avisada
     sesion = _sesion
     if sesion is None:
         return None
@@ -335,6 +340,8 @@ def terminar() -> str | None:
     else:
         logger.info("Google no contesto en %.1f s", RESPUESTA_S)
         cancelar()
+    if texto:
+        _red_avisada = False
     return texto or None
 
 

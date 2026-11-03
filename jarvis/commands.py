@@ -193,8 +193,13 @@ def _anotar_conversacion(quien: str, texto: str):
         pass
 
 
+uso_ia = False  # la orden en curso se fue a la IA: es plática, no lleva efecto de "listo" (main.py)
+
+
 def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
     """handle_command que además deja la plática en logs/dueno/."""
+    global uso_ia
+    uso_ia = False
     _anotar_conversacion("Yair", text)
 
     def respond_y_anota(msg, *args, **kwargs):
@@ -204,6 +209,7 @@ def handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
 
 
 def _handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
+    global uso_ia
     """Ejecuta el comando reconocido. respond() se usa para cada mensaje de
     salida (por defecto solo imprime; main.py le pasa una version que ademas
     habla). escuchar(), si se pasa, graba y transcribe una respuesta corta
@@ -216,6 +222,17 @@ def _handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
 
     if not t:
         respond(_sir("No entendí nada, intente de nuevo"))
+        return True
+
+    # "quita los efectos", "pon los efectos de sonido" (el mismo interruptor que F10)
+    efectos = re.fullmatch(
+        r"(?:(apaga|quita|desactiva)|(prende|pon|activa|enciende)) (?:los |tus )?(?:efectos(?: de sonido)?|sonidos)(?: por favor)?",
+        t,
+    )
+    if efectos:
+        from . import sonidos
+        sonidos.poner(bool(efectos.group(2)))
+        respond(_sir("Efectos de sonido activados" if efectos.group(2) else "Efectos de sonido apagados"))
         return True
 
     # "no", "nada", "no quiero escuchar nada"...: contestar corto y SIN pregunta.
@@ -521,11 +538,13 @@ def _handle_command(text: str, respond=print, escuchar=None, hud=None) -> bool:
 
     if _MEMORY_RECALL_RE.search(t):
         resultados = memory.search_archival(text)
+        uso_ia = True
         respond(agent.answer_from_memory(text, resultados))
         return True
 
     # ningun comando fijo coincidio: se lo pasamos al agente (Qwen2.5:7b
     # con tool-calling, ver agent.py), que decide solo si hace falta
     # ejecutar una accion real o si alcanza con responder charlando
+    uso_ia = True
     agent.ask(text, respond=respond, escuchar=escuchar, hud=hud)
     return True
