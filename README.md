@@ -8,7 +8,7 @@ Esta rama (`port-debian`) está adaptada a una laptop modesta **sin GPU dedicada
 Debian 12 con GNOME, AMD Ryzen 3 2200U (2 núcleos / 4 hilos), gráfica Vega
 integrada y 14 GB de RAM. Todo corre en la CPU.
 
-Se abre con un comando y vive en la terminal: un reactor animado en ASCII que
+Se abre con un comando y vive en la terminal: un reactor Arc animado en braille que
 cambia según lo que hace (cargando, en línea, escuchando, pensando, hablando) y
 se mueve con el audio real, un panel con lo que suena, subtítulos, historial y
 una línea para escribir comandos.
