@@ -43,10 +43,12 @@ CONFIG_FILE = DATOS / "mensajes.json"
 ESTADO_FILE = DATOS / "mensajes_estado.json"
 CONFIG_DEFAULT = {
     "activo": True,
-    "cumple": "MM-DD",  # MM-DD
+    # las fechas personales van en mensajes.json (no se sube a git), p. ej.
+    # {"cumple": "MM-DD", "aniversario": "MM-DD", "cumple_novia": "MM-DD"}
+    "cumple": None,  # MM-DD
     "aniversario_dia": 18,  # cada mes
-    "aniversario": "MM-DD",  # el especial (MM-DD)
-    "cumple_novia": "MM-DD",  # novia.py la felicita; al dueño se le avisa antes
+    "aniversario": None,  # el especial (MM-DD)
+    "cumple_novia": None,  # novia.py la felicita; al dueño se le avisa antes
     "silencio": [23, 7],  # de las 23 a las 7 no se manda nada que no sea urgente
     "max_personalidad": 6,
     # foto si entra alguien que no reconoce sin vigilancia: apagado porque hoy la cámara
@@ -214,13 +216,28 @@ def fechas_de(d: datetime.date) -> list[str]:
     return out
 
 
-def _proxima(mmdd: str, desde: datetime.date) -> datetime.date:
+MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre",
+         "octubre", "noviembre", "diciembre"]
+
+
+def fecha_larga(mmdd: str | None) -> str:
+    """"07-04" -> "4 de julio" (las fechas salen de mensajes.json)."""
+    if not mmdd:
+        return "la fecha"
+    m, d = map(int, mmdd.split("-"))
+    return f"{d} de {MESES[m - 1]}"
+
+
+def _proxima(mmdd: str | None, desde: datetime.date) -> datetime.date:
+    if not mmdd:  # fecha sin configurar: nunca llega
+        return desde + datetime.timedelta(days=400)
     m, d = map(int, mmdd.split("-"))
     f = datetime.date(desde.year, m, d)
     return f if f >= desde else datetime.date(desde.year + 1, m, d)
 
 
 def _frase_fecha(f: str) -> str:
+    cfg = config()
     return {
         "cumple": random.choice([
             "🎂 ¡Feliz cumpleaños, señor! Un año más de genialidad. Hoy no se acepta ningún «una partida más» como excusa para no celebrar.",
@@ -228,10 +245,10 @@ def _frase_fecha(f: str) -> str:
         ]),
         "cumple_novia": random.choice([
             "🎂 Hoy es el cumpleaños de su novia, señor. Yo ya la felicité de su parte; ahora le toca a usted.",
-            "🎂 {cumple}, señor: cumpleaños de la señorita. Un mensaje suyo vale más que cualquiera mío.",
+            f"🎂 {fecha_larga(cfg['cumple_novia'])}, señor: cumpleaños de la señorita. Un mensaje suyo vale más que cualquiera mío.",
         ]),
         "aniversario_especial": random.choice([
-            "💕 Hoy es {aniversario}, señor: su aniversario. Sugiero flores, una buena cena y dejar la consola apagada. Solo una sugerencia.",
+            f"💕 Hoy es {fecha_larga(cfg['aniversario'])}, señor: su aniversario. Sugiero flores, una buena cena y dejar la consola apagada. Solo una sugerencia.",
             "💕 Feliz aniversario, señor. Hoy es EL 18. Si necesita que le recuerde algo para la señorita, aquí estoy.",
         ]),
         "aniversario": random.choice([
@@ -252,14 +269,14 @@ def _revisar_fechas(ahora: datetime.datetime):
         for f in fechas_de(manana):
             texto = {"cumple": "🎂 Mañana es su cumpleaños, señor. ¿Ya tiene planes?",
                      "cumple_novia": "🎂 Mañana es el cumpleaños de su novia, señor. ¿Ya tiene el regalo?",
-                     "aniversario_especial": "💕 Mañana es {aniversario}, señor: su aniversario. ¿Ya tiene el regalo?",
+                     "aniversario_especial": f"💕 Mañana es {fecha_larga(cfg['aniversario'])}, señor: su aniversario. ¿Ya tiene el regalo?",
                      "aniversario": "💕 Mañana es 18, señor: un mes más con su novia. Por si quiere preparar algo."}[f]
             enviar(texto, "info", clave=f"fecha_antes:{f}")
     if ahora.hour >= 12 and _proxima(cfg["aniversario"], hoy) - hoy == datetime.timedelta(days=7):
-        enviar("💕 En una semana es su aniversario ({aniversario}), señor. Buen momento para pensar en el regalo.",
+        enviar(f"💕 En una semana es su aniversario ({fecha_larga(cfg['aniversario'])}), señor. Buen momento para pensar en el regalo.",
                "info", clave="fecha_semana")
     if ahora.hour >= 12 and _proxima(cfg["cumple_novia"], hoy) - hoy == datetime.timedelta(days=7):
-        enviar("🎂 En una semana es el cumpleaños de su novia ({cumple}), señor. Buen momento para el regalo.",
+        enviar(f"🎂 En una semana es el cumpleaños de su novia ({fecha_larga(cfg['cumple_novia'])}), señor. Buen momento para el regalo.",
                "info", clave="fecha_semana_novia")
 
 
@@ -269,6 +286,10 @@ def cuanto_falta(n: str) -> str | None:
         return None
     hoy = datetime.date.today()
     cfg = config()
+    clave = ("cumple_novia" if re.search(r"\bnovia\b", n) else "cumple") if re.search(r"\bcumple", n) else \
+        "aniversario" if re.search(r"\baniversario\b", n) else None
+    if clave and not cfg[clave]:
+        return _sir("No tengo esa fecha anotada. Va en mensajes.json, como MM-DD")
     if re.search(r"\bcumple", n) and re.search(r"\bnovia\b", n):
         f = _proxima(cfg["cumple_novia"], hoy)
         que = "el cumpleaños de su novia"
@@ -283,9 +304,9 @@ def cuanto_falta(n: str) -> str | None:
             mes = datetime.date(hoy.year + hoy.month // 12, hoy.month % 12 + 1, dia)
         dias, dias_mes = (f - hoy).days, (mes - hoy).days
         if dias == 0:
-            return _sir("Hoy es su aniversario, el {aniversario}. Felicidades")
+            return _sir(f"Hoy es su aniversario, el {fecha_larga(cfg['aniversario'])}. Felicidades")
         extra = "" if mes == f else (" Y hoy es 18, un mes más" if dias_mes == 0 else f" El próximo 18 es en {dias_mes} días")
-        return _sir(f"Faltan {dias} días para su aniversario, el {aniversario}.{extra}")
+        return _sir(f"Faltan {dias} días para su aniversario, el {fecha_larga(cfg['aniversario'])}.{extra}")
     else:
         return None
     dias = (f - hoy).days

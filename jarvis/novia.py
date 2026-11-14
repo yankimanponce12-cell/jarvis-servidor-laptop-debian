@@ -3,14 +3,15 @@ platique más con él (el dueño lo pidió el 2026-10-09).
 
 Cada día, máximo tres (y nada de SILENCIO[0] a SILENCIO[1]):
 - Buenos días (8:30-9:30): clima, sus recordatorios del día y cuentas
-  regresivas (su cumpleaños, el {aniversario}, el próximo 18).
+  regresivas (su cumpleaños, el aniversario especial, el próximo 18).
 - Uno "de interés" en la tarde, rotando: dato curioso (botón «otro dato»),
   trivia con botones (lleva su marcador), pregunta del día con botones (la
   respuesta le llega al dueño), chiste, frase o una sugerencia de algo que
   puede pedirle a Jarvis. Si lleva EXTRANA_DIAS sin escribirle, ese día va
   un "hace días que no platicamos" en su lugar.
 - Buenas noches (21:30-22:30), con "mañana es 18" el día 17.
-Aparte (no cuentan): aviso de lluvia, el 18 de cada mes "Yair la ama" (el {aniversario}, el especial), su cumpleaños (CUMPLE) y los mensajes que el dueño
+Aparte (no cuentan): aviso de lluvia, el 18 de cada mes "Yair la ama" (y el
+aniversario especial; las fechas van en mensajes.json), su cumpleaños (CUMPLE) y los mensajes que el dueño
 programa: "mándale a mi novia a las 3 que la quiero" (invitados.recado_del_dueno).
 
 Ella: "trivia", "mi marcador", "ya no me mandes mensajes" / "vuelve a
@@ -273,8 +274,10 @@ def _cuentas(hoy: datetime.date) -> list[str]:
     especial = (_proxima(cfg["aniversario"], hoy) - hoy).days
     mes = (_proximo_dia(int(cfg["aniversario_dia"]), hoy) - hoy).days
     if 0 < especial <= 30:
-        out.append("💕 ¡Mañana es su aniversario, el {aniversario}!" if especial == 1 else
-                   f"💕 Faltan {especial} días para su aniversario, el {aniversario}.")
+        from .mensajes import fecha_larga
+        fecha = fecha_larga(cfg["aniversario"])
+        out.append(f"💕 ¡Mañana es su aniversario, el {fecha}!" if especial == 1 else
+                   f"💕 Faltan {especial} días para su aniversario, el {fecha}.")
     elif 0 < mes <= 3:
         out.append("💕 Mañana es 18." if mes == 1 else f"💕 En {mes} días es 18.")
     return out
@@ -317,7 +320,8 @@ def buenas_noches(hoy: datetime.date | None = None) -> str:
     manana = hoy + datetime.timedelta(days=1)
     cfg = config()
     if f"{manana:%m-%d}" == cfg["aniversario"]:
-        texto += "\n💕 Mañana es {aniversario}: su aniversario."
+        from .mensajes import fecha_larga
+        texto += f"\n💕 Mañana es {fecha_larga(cfg['aniversario'])}: su aniversario."
     elif manana.day == int(cfg["aniversario_dia"]):
         texto += "\n💕 Mañana es 18."
     if f"{manana:%m-%d}" == cfg["cumple_novia"]:
@@ -401,7 +405,10 @@ def _lluvia() -> str | None:
 
 
 def _fecha(f: str) -> str:
-    return random.choice({"aniversario": AMOR_MES, "aniversario especial": AMOR_ANIO, "cumpleanos": CUMPLE_FRASES}[f])
+    from .mensajes import config, fecha_larga
+    cfg = config()
+    frase = random.choice({"aniversario": AMOR_MES, "aniversario especial": AMOR_ANIO, "cumpleanos": CUMPLE_FRASES}[f])
+    return frase.replace("{aniversario}", fecha_larga(cfg["aniversario"])).replace("{cumple}", fecha_larga(cfg["cumple_novia"]))
 
 
 # -------------------------------------------------------------------- hilo --
